@@ -1,0 +1,7 @@
+*.parquet
+*.pkl
+*.txt
+*.json
+*.tsv
+*.zip
+*.pk
