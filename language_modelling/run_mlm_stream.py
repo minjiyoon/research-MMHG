@@ -16,6 +16,7 @@
 # limitations under the License.
 """ Finetuning document classification models"""
 import logging
+import math
 import os
 import random
 import sys
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import datasets
+from datasets import load_metric
 import numpy as np
 from scipy.special import expit
 
@@ -31,8 +33,7 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForSequenceClassification,
-    DataCollatorWithPadding,
-    EvalPrediction,
+    DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
@@ -42,7 +43,7 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
-from models import TDOConfig, TDOForSequenceClassification
+from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 from data import OAGDataset
 from sklearn.metrics import f1_score
 
@@ -63,18 +64,21 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-    max_seq_length: Optional[int]
-        default=128, metadata={"help": "The maximum total input sequence length after tokenization."}
+    max_length: Optional[int] = field(
+        default=64, metadata={"help": "The maximum total input sequence length after tokenization."}
     )
-    overwrite_cache: bool = field(
+    overwrite_cache: Optional[bool] = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
     )
-    pad_to_max_length: bool = field(
+    pad_to_max_length: Optional[bool] = field(
         default=True,
         metadata={
             "help": "Whether to pad all samples to `max_seq_length`. "
             "If False, will pad the samples dynamically when batching to the maximum length in the batch."
         },
+    )
+    mlm_probability: float = field(
+        default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
     )
 
     train_ratio: Optional[float] = field(
@@ -101,7 +105,7 @@ class DataTrainingArguments:
         default=2, metadata={"help": "neighborhood hops for the computation graph sampling."}
     )
     sample_num: Optional[int] = field(
-        default=3, metadata={"help": "number of neighbors to sample per node."}
+        default=2, metadata={"help": "number of neighbors to sample per node."}
     )
 
     server_ip: Optional[str] = field(default=None, metadata={"help": "For distant debugging."})
@@ -202,33 +206,49 @@ def main():
     set_seed(training_args.seed)
 
     raw_dataset = OAGDataset(data_args)
-    num_labels = raw_dataset.label_num
-    label_names = raw_dataset.label_set
     dataset = raw_dataset.load_dataset()
-
-    label_list = list(range(num_labels))
 
     # Load pretrained model and tokenizer
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    if "TDO" in model_args.model_name_or_path:
+    if "text-decoder-only" in model_args.model_name_or_path:
         #tokenizer = AutoTokenizer.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
         #model = EncoderDecoderModel.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
         #tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         #model = EncoderDecoderModel.from_encoder_decoder_pretrained('bert-base-uncased', 'bert-base-uncased')
         config = TDOConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
-        model = TDPForSequenceClassification.from_pretrained(model_args.model_name_or_path, pooling=model_args.pooling)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        model = TDOForMaskedLM.from_pretrained(model_args.model_name_or_path)
 
     # Preprocessing the datasets
     def preprocess_function(examples):
-        batch = raw_dataset.prepare_neighbors(
-            examples,
-            tokenizer,
-            padding="max_length",
-            max_length=data_args.max_seq_length,
-        )
+        #batch = tokenizer(examples['text'], padding='max_length', truncation=True, max_length=data_args.max_length)
+        #return batch
+
+        batch = tokenizer(
+                examples["text"],
+                padding="max_length",
+                truncation=True,
+                max_length=data_args.max_length,
+                # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
+                # receives the `special_tokens_mask`.
+                return_special_tokens_mask=True,
+                )
+
+        encoder_hidden_states = []
+        encoder_attention_mask = []
+        labels = []
+        for seed_id in examples["id"]:
+            outputs = raw_dataset.sample_computation_graph(seed_id)
+            encoder_hidden_states.append(outputs['feats'])
+            encoder_attention_mask.append(outputs['attention_mask'])
+            labels.append(outputs['label'])
+
+        batch['encoder_hidden_states'] = encoder_hidden_states
+        batch['encoder_attention_mask'] = encoder_attention_mask
+        batch['labels'] = labels
         return batch
+
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
         dataset = dataset.map(
@@ -236,32 +256,50 @@ def main():
             batched=True,
             batch_size=256,
             writer_batch_size=256,
-            catch_file_name=f"data/cache/{data_args.dataset}_{data_args.sample_num}_{data_args.sample_depth}_{data_args.label_type}",
             load_from_cache_file=not data_args.overwrite_cache,
+            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}",
             desc="Sampling computation graphs on dataset",
-            num_proc=30
+            #num_proc=30
         )
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(dataset)), 3):
         logger.info(f"Sample {index} of the dataset: {dataset[index]}.")
 
-    train_samples = int(data_args.train_ratio * len(dataset))
+    # Use prediction set during pretraining
+    train_samples = int(data_args.train_ratio * len(dataset)) +  int(data_args.predict_ratio * len(dataset))
     train_dataset = dataset.select(range(train_samples))
 
     eval_samples = int(data_args.eval_ratio * len(dataset))
-    eval_dataset = dataset.select(range(train_samples, train_sample + eval_samples))
+    eval_dataset = dataset.select(range(train_samples, train_samples + eval_samples))
 
-    predict_samples = int(data_args.predict_ratio * len(dataset))
-    predict_dataset = dataset.select(range(train_sample + eval_samples, train_sample + eval_samples + predict_samples))
+    def preprocess_logits_for_metrics(logits, labels):
+        if isinstance(logits, tuple):
+            # Depending on the model and config, logits may contain extra tensors,
+            # like past_key_values, but logits always come first
+            logits = logits[0]
+        return logits.argmax(dim=-1)
 
-    def compute_metrics(p: EvalPrediction):
-        logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-        preds = (expit(logits) > 0.5).astype(int)
-        label_ids = (p.label_ids > 0.5).astype(int)
-        macro_f1 = f1_score(y_true=label_ids, y_pred=preds, average='macro', zero_division=0)
-        micro_f1 = f1_score(y_true=label_ids, y_pred=preds, average='micro', zero_division=0)
-        return {'macro_f1': macro_f1, 'micro_f1': micro_f1}
+    metric = load_metric("accuracy")
+
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        # preds have the same shape as the labels, after the argmax(-1) has been calculated
+        # by preprocess_logits_for_metrics
+        labels = labels.reshape(-1)
+        preds = preds.reshape(-1)
+        mask = labels != -100
+        labels = labels[mask]
+        preds = preds[mask]
+        return metric.compute(predictions=preds, references=labels)
+
+    # Data collator
+    # This one will take care of randomly masking the tokens.
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm_probability=data_args.mlm_probability,
+        pad_to_multiple_of=data_args.max_length,
+    )
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -269,9 +307,10 @@ def main():
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
-        compute_metrics=compute_metrics,
         tokenizer=tokenizer,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
 
     # Training
@@ -282,10 +321,8 @@ def main():
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        metrics = train_result.metrics
-        metrics["train_samples"] = train_samples
-
         trainer.save_model()  # Saves the tokenizer too for easy upload
+        metrics = train_result.metrics
 
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
@@ -294,29 +331,27 @@ def main():
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate(eval_dataset=eval_dataset)
-        metrics["eval_samples"] = eval_samples
+        metrics = trainer.evaluate()
+
+        try:
+            perplexity = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            perplexity = float("inf")
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
-    # Prediction
-    if training_args.do_predict:
-        logger.info("*** Predict ***")
-        predictions, labels, metrics = trainer.predict(predict_dataset, metric_key_prefix="predict")
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "fill-mask"}
+    if data_args.dataset is not None:
+        kwargs["dataset_tags"] = data_args.dataset
+        if data_args.dataset_domain is not None:
+            kwargs["dataset_args"] = data_args.dataset_domain
+            kwargs["dataset"] = f"{data_args.dataset} {data_args.dataset_domain}"
+        else:
+            kwargs["dataset"] = data_args.dataset
 
-        metrics["predict_samples"] = predict_samples
-
-        trainer.log_metrics("predict", metrics)
-        trainer.save_metrics("predict", metrics)
-
-        predictions = np.argmax(predictions, axis=1)
-        output_predict_file = os.path.join(training_args.output_dir, "predictions.csv")
-        if trainer.is_world_process_zero():
-            with open(output_predict_file, "w") as writer:
-                for index, item in enumerate(predictions):
-                    writer.write(f"{index}\t{item}\n")
-
+    # Needed to avoid TPU hanging
+    sys.exit()
 
 if __name__ == "__main__":
     main()

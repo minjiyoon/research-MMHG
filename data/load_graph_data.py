@@ -10,6 +10,7 @@ from functools import partial
 
 from scipy import sparse as sps
 from sklearn.preprocessing import normalize
+from datasets import Dataset
 import numpy as np
 import torch
 
@@ -18,7 +19,7 @@ class OAGDataset:
     def __init__(self, args):
 
         self.node_types = ['paper', 'venue', 'fos']
-        self.text_columns {'paper': 'title', 'venue': 'name', 'fos': 'name'}
+        self.text_columns = {'paper': 'title', 'venue': 'name', 'fos': 'name'}
         self.edge_types = ['paper2paper', 'paper2fos', 'paper2venue', 'fos2paper', 'venue2paper']
 
         self.df_nodes = {}
@@ -33,8 +34,8 @@ class OAGDataset:
 
         for node_type in self.node_types:
             if node_type == 'paper':
-                df = graph.node_feature[node_type][self.text_columns[node_type]]
-                df.rename(columns = {self.text_columns[node_type] : 'text'})
+                df = graph.node_feature[node_type].loc[:, [self.text_columns[node_type]]]
+                df = df.rename(columns = {self.text_columns[node_type] : 'text'})
                 df['id'] = list(range(df.shape[0]))
                 self.df_target = df
             data_file = f'data/mag_small/{args.dataset_domain}_{node_type}_bert.parquet'
@@ -89,8 +90,8 @@ class OAGDataset:
         return source_ids
 
     def sample_computation_graph(self, seed_id):
-        sampled_nodes = defaultdict(set)
-        sampled_nodes['paper'].update([seed_id])
+        sampled_nodes = defaultdict(list)
+        sampled_nodes['paper'].append(seed_id)
 
         target_type_list = set(['paper'])
         target_node_list = defaultdict(list)
@@ -109,7 +110,7 @@ class OAGDataset:
                             sampled_ids = source_ids
                         else:
                             sampled_ids = np.random.choice(source_ids, self.sample_num, replace = False)
-                        sampled_nodes[source_type].update(sampled_ids)
+                        sampled_nodes[source_type].extend(sampled_ids)
                         new_target_node_list[source_type].extend(sampled_ids)
             target_type_list = new_target_type_list
             target_node_list = new_target_node_list
@@ -130,29 +131,9 @@ class OAGDataset:
 
         # Normalize label
         label_list = [self.label_set.index(fos) for fos in self.labels[seed_id]]
-        label = torch.zeros(self.label_dim, dtype=torch.float32)
+        label = torch.zeros(self.label_num, dtype=torch.float32)
         label[label_list] = 1
 
         return {'feats': feats, 'attention_mask': attention_mask, 'label': label}
 
-    def prepare_neighbors(self, examples, tokenizer, padding, max_length):
-        batch = {}
 
-        inputs = tokenizer(examples['text'], padding=padding, truncation=True, max_length=max_length)
-        for k in inputs.keys():
-            batch[k] = inputs[k]
-
-        encoder_hidden_states = []
-        encoder_attention_mask = []
-        labels = []
-        for seed_id in examples["id"]:
-            outputs = self.sample_computation_graph(seed_id)
-            encoder_hidden_states.append(outputs['feats'])
-            encoder_attention_mask.append(outputs['attention_mask'])
-            labels.append(outputs['label'])
-
-        batch['encoder_hidden_states'] = encoder_hidden_states
-        batch['encoder_attention_mask'] = encoder_attention_mask
-        batch['labels'] = labels
-
-        return batch

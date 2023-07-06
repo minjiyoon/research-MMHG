@@ -1,21 +1,22 @@
 export PYTHONPATH=.
 
+MODEL_NAME='text-decoder-only'
+LAYOUT='s1'
 POOLING_METHOD='max'
 
-#--model_name_or_path data/PLMs/${MODEL_NAME} \
-python language_modelling/run_decoder_only.py \
-    --model_name_or_path bert \
-    --dataset_name oag \
-    --dataset_config_name paper \
+python language_modelling/run_node_classification.py \
+    --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT}-mlm \
+    --pooling ${POOLING_METHOD} \
+    --dataset oag \
+    --dataset_domain CS \
     --do_train \
     --do_eval \
     --do_predict \
-    --pooling ${POOLING_METHOD} \
-    --output_dir data/PLMs/oag_decoder_only \
+    --output_dir model/PLMs/${MODEL_NAME}-${LAYOUT}-nc \
     --overwrite_output_dir \
     --evaluation_strategy epoch \
     --save_strategy epoch \
-    --num_train_epochs 100 \
+    --num_train_epochs 20 \
     --load_best_model_at_end \
     --metric_for_best_model micro_f1 \
     --greater_is_better True \

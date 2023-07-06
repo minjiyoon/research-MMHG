@@ -87,7 +87,7 @@ class TDOConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=30522,
-        max_length=128,
+        max_length=64,
         max_neighbors=64,
         encoder_layout=None,
         hidden_size=768,

@@ -4,6 +4,7 @@ import torch
 import copy
 import warnings
 from transformers import EncoderDecoderModel, AutoTokenizer
+from model import TDOForMaskedLM, TDOConfig
 
 warnings.filterwarnings("ignore")
 
@@ -34,7 +35,7 @@ def prepare_decoder():
     parser.add_argument('--layout', default='s1', choices=['s1', 's2', 'p1', 'p2', 'e1', 'e2',
                                                            'l1', 'l2', 'b1', 'b2', 'f12', 'f8', 'f6'],
                         help='S|D encoders layout')
-    parser.add_argument('--max_length', default=128)
+    parser.add_argument('--max_length', default=64)
     parser.add_argument('--max_neighbors', default=64)
     config = parser.parse_args()
 
@@ -49,7 +50,7 @@ def prepare_decoder():
     # load pre-trained bert model and tokenizer
     BERT_CHECKPOINT = f'patrickvonplaten/bert2bert_cnn_daily_mail'
     tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT)
-    bert_model = EncoderDecoderModel.from_pretrained(BERT_CHECKPOINT)
+    bert_model = EncoderDecoderModel.from_pretrained(BERT_CHECKPOINT).decoder
 
     # load dummy config and change specifications
     bert_config = bert_model.config
@@ -57,7 +58,7 @@ def prepare_decoder():
     # Text length parameters
     tdo_config.max_length = MAX_LENGTH
     tdo_config.max_neighbors = MAX_NEIGHBORS
-    tdo_config.max_position_embeddings = MAX_SENTENCE_LENGTH
+    tdo_config.max_position_embeddings = MAX_LENGTH
     tdo_config.num_hidden_layers = NUM_HIDDEN_LAYERS
     # Transformer parameters
     tdo_config.hidden_size = bert_config.hidden_size
@@ -77,15 +78,14 @@ def prepare_decoder():
     #tdo_model = TDOForSequenceClassification.from_config(tdo_config)
 
     # copy embeddings
-    tdo_model.text_decoder.embeddings.position_embeddings.weight.data[0] = torch.zeros((bert_config.hidden_size,))
-    tdo_model.text_decoder.embeddings.position_embeddings.weight.data[1:] = bert_model.bert.embeddings.position_embeddings.weight[1:MAX_LENGTH+tdo_config.pad_token_id+1]
+    tdo_model.text_decoder.embeddings.position_embeddings.weight.data = bert_model.bert.embeddings.position_embeddings.weight[:MAX_LENGTH]
     tdo_model.text_decoder.embeddings.word_embeddings.load_state_dict(bert_model.bert.embeddings.word_embeddings.state_dict())
     tdo_model.text_decoder.embeddings.token_type_embeddings.load_state_dict(bert_model.bert.embeddings.token_type_embeddings.state_dict())
     tdo_model.text_decoder.embeddings.LayerNorm.load_state_dict(bert_model.bert.embeddings.LayerNorm.state_dict())
 
     # copy transformer layers
     for idx in range(NUM_HIDDEN_LAYERS):
-        missing_keys, unexpected_keys = tdo_model.text_decoder.decoder.layer[idx].load_state_dict(bert_model.bert.encoder.layer[idx].state_dict(), strcit=False)
+        missing_keys, unexpected_keys = tdo_model.text_decoder.decoder.layer[idx].load_state_dict(bert_model.bert.encoder.layer[idx].state_dict(), strict=False)
         print(f'{idx}th layer missing_keys: {missing_keys}, unexpected_keys: {unexpected_keys}')
 
     # copy lm_head
@@ -102,7 +102,7 @@ def prepare_decoder():
 
     # re-load model
     tdo_model = TDOForMaskedLM.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
-    tdo_tokenizer = TDOTokenizer.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
+    tdo_tokenizer = AutoTokenizer.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
     print(f'TDO model with layout {config.layout} is ready to run!')
 
 

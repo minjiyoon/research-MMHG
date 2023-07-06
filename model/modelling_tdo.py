@@ -33,14 +33,17 @@ from transformers.modeling_outputs import (
     QuestionAnsweringModelOutput,
     SequenceClassifierOutput,
     TokenClassifierOutput,
-    BaseModelOutputWithPastAndCrossAttentions
+    BaseModelOutputWithPastAndCrossAttentions,
+    BaseModelOutputWithPoolingAndCrossAttentions
 )
 from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import apply_chunking_to_forward
 from transformers.utils import logging
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
 from transformers.activations import gelu
 from transformers import PretrainedConfig
 
+from .configuration_tdo import TDOConfig
 
 logger = logging.get_logger(__name__)
 
@@ -58,7 +61,7 @@ class TDOEmbeddings(nn.Module):
     # Copied from transformers.models.bert.modeling_bert.BertEmbeddings.__init__
     def __init__(self, config):
         super().__init__()
-        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_idx)
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
@@ -367,7 +370,7 @@ class AttentivePooling(nn.Module):
         return torch.sum(attention_weights_normalized.unsqueeze(-1) * inputs, 1)
 
 
-class TPOPooler(nn.Module):
+class TDOPooler(nn.Module):
     def __init__(self, config, pooling='cls'):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -375,7 +378,6 @@ class TPOPooler(nn.Module):
         if self.pooling == 'attentive':
             self.attentive_pooling = AttentivePooling(config)
         self.activation = nn.Tanh()
-        self.max_sentence_length = config.max_sentence_length
 
     def forward(self, hidden_states):
         if self.pooling == 'attentive':
@@ -432,7 +434,7 @@ class TDOModel(TDOPreTrainedModel):
         class PreTrainedModel
         """
         for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
+            self.decoder.layer[layer].attention.prune_heads(heads)
 
     @add_start_docstrings_to_model_forward(TDO_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
@@ -461,7 +463,7 @@ class TDOModel(TDOPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if input_ids is None or neighbor_embeds is None:
+        if input_ids is None or encoder_hidden_states is None:
             raise ValueError("You have to specify both input_ids and neighbor_embeds at the same time")
 
         input_shape = input_ids.size()
@@ -512,10 +514,10 @@ class TDOModel(TDOPreTrainedModel):
 
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
+            pooler_output=None,
             hidden_states=decoder_outputs.hidden_states,
             attentions=decoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
         )
 
 
@@ -629,7 +631,7 @@ class TDOForMaskedLM(TDOPreTrainedModel):
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask
+            encoder_attention_mask=encoder_attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -714,13 +716,13 @@ class TDOForSequenceClassification(TDOPreTrainedModel):
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask
+            encoder_attention_mask=encoder_attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
         sequence_output = outputs[0]
-        if self.pooling == 'cls'
+        if self.pooling == 'cls':
             pooled_output = self.pooler(torch.unsqueeze(sequence_output[:, 0, :], 1))
         elif self.pooling == 'attentive':
             pooled_output = self.pooler(sequence_output)
