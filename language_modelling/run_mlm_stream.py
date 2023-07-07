@@ -212,13 +212,10 @@ def main():
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     if "text-decoder-only" in model_args.model_name_or_path:
-        #tokenizer = AutoTokenizer.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
-        #model = EncoderDecoderModel.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
-        #tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        #model = EncoderDecoderModel.from_encoder_decoder_pretrained('bert-base-uncased', 'bert-base-uncased')
         config = TDOConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         model = TDOForMaskedLM.from_pretrained(model_args.model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
     # Preprocessing the datasets
     def preprocess_function(examples):

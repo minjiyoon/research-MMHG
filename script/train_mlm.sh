@@ -20,10 +20,11 @@ python3 language_modelling/run_mlm_stream.py \
     --learning_rate 1e-4 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 32 \
-    --gradient_accumulation_steps 32 \
+    --gradient_accumulation_steps 1 \
     --eval_accumulation_steps 32 \
+    --dataloader_num_workers 32 \
     --lr_scheduler_type linear \
     --warmup_ratio 0.10 \
     --weight_decay 0.01 \
     --mlm_probability 0.15 \
-    --pad_to_max_length
+    --pad_to_max_length  

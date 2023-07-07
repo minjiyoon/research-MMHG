@@ -33,6 +33,7 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForSequenceClassification,
+    EvalPrediction,
     DefaultDataCollator,
     HfArgumentParser,
     Trainer,
@@ -203,6 +204,7 @@ def main():
     set_seed(training_args.seed)
 
     raw_dataset = OAGDataset(data_args)
+    num_labels = raw_dataset.label_num
     dataset = raw_dataset.load_dataset()
 
     # Load pretrained model and tokenizer
@@ -213,16 +215,17 @@ def main():
         #model = EncoderDecoderModel.from_pretrained("patrickvonplaten/bert2bert_cnn_daily_mail")
         #tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         #model = EncoderDecoderModel.from_encoder_decoder_pretrained('bert-base-uncased', 'bert-base-uncased')
-        config = TDOConfig.from_pretrained(model_args.model_name_or_path)
+        config = TDOConfig.from_pretrained(
+                model_args.model_name_or_path,
+                num_labels=num_labels,
+                finetunig_task="node-classification",
+                cache_dir=model_args.cache_dir)
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         model = TDOForSequenceClassification.from_pretrained(
                 model_args.model_name_or_path,
                 pooling=model_args.pooling,
                 config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                )
+                cache_dir=model_args.cache_dir)
 
     # Preprocessing the datasets
     def preprocess_function(examples):

@@ -723,7 +723,7 @@ class TDOForSequenceClassification(TDOPreTrainedModel):
         )
         sequence_output = outputs[0]
         if self.pooling == 'cls':
-            pooled_output = self.pooler(torch.unsqueeze(sequence_output[:, 0, :], 1))
+            pooled_output = self.pooler(sequence_output[:, 0, :])
         elif self.pooling == 'attentive':
             pooled_output = self.pooler(sequence_output)
 

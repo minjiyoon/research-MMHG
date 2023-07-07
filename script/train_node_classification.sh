@@ -2,7 +2,7 @@ export PYTHONPATH=.
 
 MODEL_NAME='text-decoder-only'
 LAYOUT='s1'
-POOLING_METHOD='max'
+POOLING_METHOD='cls'
 
 python language_modelling/run_node_classification.py \
     --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT}-mlm \
