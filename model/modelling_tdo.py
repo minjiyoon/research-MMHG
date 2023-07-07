@@ -749,7 +749,9 @@ class TDOForSequenceClassification(TDOPreTrainedModel):
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
             elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
+                #loss_fct = BCEWithLogitsLoss()
+                logits = torch.log_softmax(logits, dim=-1)
+                loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
                 loss = loss_fct(logits, labels)
 
         if not return_dict:

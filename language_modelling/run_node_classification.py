@@ -147,6 +147,23 @@ class ModelArguments:
     )
 
 
+def dcg_at_k(r, k):
+    r = np.asfarray(r)[:k]
+    if r.size:
+        return r[0] + np.sum(r[1:] / np.log2(np.arange(2, r.size + 1)))
+    return 0.
+
+def ndcg_at_k(r, k):
+    dcg_max = dcg_at_k(sorted(r, reverse=True), k)
+    if not dcg_max:
+        return 0.
+    return dcg_at_k(r, k) / dcg_max
+
+def mean_reciprocal_rank(rs):
+    rs = (np.asarray(r).nonzero()[0] for r in rs)
+    return [1. / (r[0] + 1) if r.size else 0. for r in rs]
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -284,12 +301,15 @@ def main():
     predict_dataset = dataset.select(range(train_samples + eval_samples, train_samples +eval_samples + predict_samples))
 
     def compute_metrics(p: EvalPrediction):
-        logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-        preds = (expit(logits) > 0.5).astype(int)
-        label_ids = (p.label_ids > 0.5).astype(int)
-        macro_f1 = f1_score(y_true=label_ids, y_pred=preds, average='macro', zero_division=0)
-        micro_f1 = f1_score(y_true=label_ids, y_pred=preds, average='micro', zero_division=0)
-        return {'macro_f1': macro_f1, 'micro_f1': micro_f1}
+        res = []
+        ndcg = []
+        for ai, bi in zip(p.label_ids, torch.argsort(p.predictions, dim=-1, descending=True)):
+            resi = ai[bi].cpu().numpy()
+            res += [resi]
+            ndcg += [ndcg_at_k(resi, len(resi))]
+        ndcg = np.average(ndcg)
+        mrr = np.average(mean_reciprocal_rank(res))
+        return {'ndcg': ndcg, 'mrr': test_mrr}
 
     # Data collator
     # This one will take care of randomly masking the tokens.
