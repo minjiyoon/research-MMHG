@@ -1,5 +1,6 @@
 export PYTHONPATH=.
 
+DESCRIPTION='v1'
 LAYOUT='s1'
 
 #python3 language_modelling/convert_bert_to_tdo.py --layout ${LAYOUT}
@@ -10,16 +11,16 @@ python3 language_modelling/run_mlm_stream.py \
     --dataset_domain CS \
     --do_train \
     --do_eval \
-    --output_dir model/PLMs/text-decoder-only-${LAYOUT}-mlm \
+    --output_dir model/PLMs/text-decoder-only-${LAYOUT}-mlm-${DESCRIPTION} \
     --overwrite_output_dir \
     --logging_strategy epoch \
     --evaluation_strategy epoch \
     --save_strategy epoch \
-    --num_train_epochs 10 \
+    --num_train_epochs 50 \
     --save_total_limit 5 \
-    --learning_rate 1e-4 \
-    --per_device_train_batch_size 32 \
-    --per_device_eval_batch_size 32 \
+    --learning_rate 4e-4 \
+    --per_device_train_batch_size 128 \
+    --per_device_eval_batch_size 128 \
     --gradient_accumulation_steps 1 \
     --eval_accumulation_steps 32 \
     --dataloader_num_workers 32 \

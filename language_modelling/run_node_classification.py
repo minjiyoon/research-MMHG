@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+import torch
 import datasets
 from datasets import load_metric
 import numpy as np
@@ -46,7 +47,6 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 from data import OAGDataset
-from sklearn.metrics import f1_score
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
@@ -66,7 +66,7 @@ class DataTrainingArguments:
     the command line.
     """
     max_length: Optional[int] = field(
-        default=128, metadata={"help": "The maximum total input sequence length after tokenization."}
+        default=64, metadata={"help": "The maximum total input sequence length after tokenization."}
     )
     overwrite_cache: Optional[bool] = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
@@ -243,6 +243,7 @@ def main():
                 pooling=model_args.pooling,
                 config=config,
                 cache_dir=model_args.cache_dir)
+        no_neighbors = ("f8" in model_args.model_name_or_path)
 
     # Preprocessing the datasets
     def preprocess_function(examples):
@@ -263,13 +264,15 @@ def main():
         encoder_attention_mask = []
         labels = []
         for seed_id in examples["id"]:
-            outputs = raw_dataset.sample_computation_graph(seed_id)
-            encoder_hidden_states.append(outputs['feats'])
-            encoder_attention_mask.append(outputs['attention_mask'])
-            labels.append(outputs['label'])
+            if no_neighbors is False:
+                outputs = raw_dataset.sample_computation_graph(seed_id)
+                encoder_hidden_states.append(outputs['feats'])
+                encoder_attention_mask.append(outputs['attention_mask'])
+            label = raw_dataset.get_label(seed_id)
+            labels.append(label)
 
-        batch['encoder_hidden_states'] = encoder_hidden_states
-        batch['encoder_attention_mask'] = encoder_attention_mask
+        batch['encoder_hidden_states'] = None if no_neighbors else encoder_hidden_states
+        batch['encoder_attention_mask'] = None if no_neighbors else encoder_attention_mask
         batch['labels'] = labels
         return batch
 
@@ -301,15 +304,21 @@ def main():
     predict_dataset = dataset.select(range(train_samples + eval_samples, train_samples +eval_samples + predict_samples))
 
     def compute_metrics(p: EvalPrediction):
+        y_pred, y_true = torch.from_numpy(p.predictions), torch.from_numpy(p.label_ids)
+
+        loss_fct = torch.nn.KLDivLoss(reduction='batchmean')
+        loss = loss_fct(y_pred, y_true)
+
         res = []
         ndcg = []
-        for ai, bi in zip(p.label_ids, torch.argsort(p.predictions, dim=-1, descending=True)):
+        for ai, bi in zip(y_true, torch.argsort(y_pred, dim=-1, descending=True)):
             resi = ai[bi].cpu().numpy()
             res += [resi]
             ndcg += [ndcg_at_k(resi, len(resi))]
         ndcg = np.average(ndcg)
         mrr = np.average(mean_reciprocal_rank(res))
-        return {'ndcg': ndcg, 'mrr': test_mrr}
+
+        return {'loss': loss, 'ndcg': ndcg, 'mrr': mrr}
 
     # Data collator
     # This one will take care of randomly masking the tokens.
@@ -324,7 +333,7 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=5)]
     )
 
     # Training

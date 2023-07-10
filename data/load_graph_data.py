@@ -129,11 +129,15 @@ class OAGDataset:
         attention_mask = torch.zeros((self.max_neighbors))
         attention_mask[:sampled_attention_mask.shape[0]] = sampled_attention_mask
 
+        return {'feats': feats, 'attention_mask': attention_mask}
+
+
+    def get_label(self, seed_id):
         # Normalize label
         label_list = [self.label_set.index(fos) for fos in self.labels[seed_id]]
         label = torch.zeros(self.label_num, dtype=torch.float32)
         label[label_list] = 1
 
-        return {'feats': feats, 'attention_mask': attention_mask, 'label': label}
+        return label
 
 

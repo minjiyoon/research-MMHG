@@ -212,10 +212,11 @@ def main():
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     if "text-decoder-only" in model_args.model_name_or_path:
-        config = TDOConfig.from_pretrained(model_args.model_name_or_path)
-        model = TDOForMaskedLM.from_pretrained(model_args.model_name_or_path)
+        config = TDOConfig.from_pretrained(model_args.model_name_or_path, cache_dir=model_args.cache_dir)
+        model = TDOForMaskedLM.from_pretrained(model_args.model_name_or_path, config=config, cache_dir=model_args.cache_dir)
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+        no_neighbors = ("f8" in model_args.model_name_or_path)
 
     # Preprocessing the datasets
     def preprocess_function(examples):
@@ -236,13 +237,15 @@ def main():
         encoder_attention_mask = []
         labels = []
         for seed_id in examples["id"]:
-            outputs = raw_dataset.sample_computation_graph(seed_id)
-            encoder_hidden_states.append(outputs['feats'])
-            encoder_attention_mask.append(outputs['attention_mask'])
+            if no_neighbors is False:
+                outputs = raw_dataset.sample_computation_graph(seed_id)
+                encoder_hidden_states.append(outputs['feats'])
+                encoder_attention_mask.append(outputs['attention_mask'])
+            label = raw_dataset.get_label(seed_id)
             labels.append(outputs['label'])
 
-        batch['encoder_hidden_states'] = encoder_hidden_states
-        batch['encoder_attention_mask'] = encoder_attention_mask
+        batch['encoder_hidden_states'] = None if no_neighbors else encoder_hidden_states
+        batch['encoder_attention_mask'] = None if no_neighbors else encoder_attention_mask
         batch['labels'] = labels
         return batch
 

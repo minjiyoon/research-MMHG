@@ -463,8 +463,8 @@ class TDOModel(TDOPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if input_ids is None or encoder_hidden_states is None:
-            raise ValueError("You have to specify both input_ids and neighbor_embeds at the same time")
+        if input_ids is None:
+            raise ValueError("You have to specify input_ids")
 
         input_shape = input_ids.size()
         batch_size, seq_length = input_shape
@@ -485,13 +485,14 @@ class TDOModel(TDOPreTrainedModel):
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
 
-        encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
-        encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-        if encoder_attention_mask is None:
-            encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
-        else:
+        if encoder_hidden_states is None:
             encoder_extended_attention_mask = None
+        else:
+            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
+            if encoder_attention_mask is None:
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
 
         embedding_output = self.embeddings(
             input_ids=input_ids,
