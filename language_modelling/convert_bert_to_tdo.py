@@ -3,7 +3,7 @@ import argparse
 import torch
 import copy
 import warnings
-from transformers import EncoderDecoderModel, AutoTokenizer
+from transformers import EncoderDecoderModel, AutoModelForMaskedLM, AutoTokenizer
 from model import TDOForMaskedLM, TDOConfig
 
 warnings.filterwarnings("ignore")
@@ -48,9 +48,14 @@ def prepare_decoder():
     NUM_HIDDEN_LAYERS = len(ENCODER_LAYOUT.keys())
 
     # load pre-trained bert model and tokenizer
-    BERT_CHECKPOINT = f'patrickvonplaten/bert2bert_cnn_daily_mail'
-    tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT)
-    bert_model = EncoderDecoderModel.from_pretrained(BERT_CHECKPOINT).decoder
+    if 'f' in config.layout:
+        BERT_CHECKPOINT = f'google/bert_uncased_L-{str(NUM_HIDDEN_LAYERS)}_H-256_A-4'
+        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH * MAX_NEIGHBORS)
+        bert_model = AutoModelForMaskedLM.from_pretrained(BERT_CHECKPOINT)
+    else:
+        BERT_CHECKPOINT = f'patrickvonplaten/bert2bert_cnn_daily_mail'
+        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH * MAX_NEIGHBORS)
+        bert_model = EncoderDecoderModel.from_pretrained(BERT_CHECKPOINT).decoder
 
     # load dummy config and change specifications
     bert_config = bert_model.config

@@ -1,9 +1,9 @@
 export PYTHONPATH=.
 
-DESCRIPTION='v1'
-LAYOUT='s1'
+DESCRIPTION='pretrain'
+LAYOUT='f8'
 
-#python3 language_modelling/convert_bert_to_tdo.py --layout ${LAYOUT}
+python3 language_modelling/convert_bert_to_tdo.py --layout ${LAYOUT}
 
 python3 language_modelling/run_mlm_stream.py \
     --model_name_or_path model/PLMs/text-decoder-only-${LAYOUT} \

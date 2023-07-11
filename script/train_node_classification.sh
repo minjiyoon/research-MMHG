@@ -1,8 +1,8 @@
 export PYTHONPATH=.
 
-DESCRIPTION='v1'
+DESCRIPTION='pretrain'
 MODEL_NAME='text-decoder-only'
-LAYOUT='s1'
+LAYOUT='f8'
 POOLING_METHOD='cls'
 
 python language_modelling/run_node_classification.py \
