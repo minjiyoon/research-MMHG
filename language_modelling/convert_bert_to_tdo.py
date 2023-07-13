@@ -32,6 +32,8 @@ def prepare_decoder():
     parser = argparse.ArgumentParser()
 
     # Required arguments
+    parser.add_argument('--description', default='default')
+    parser.add_argument('--random_init', default=False)
     parser.add_argument('--layout', default='s1', choices=['s1', 's2', 'p1', 'p2', 'e1', 'e2',
                                                            'l1', 'l2', 'b1', 'b2', 'f12', 'f8', 'f6'],
                         help='S|D encoders layout')
@@ -48,8 +50,8 @@ def prepare_decoder():
     NUM_HIDDEN_LAYERS = len(ENCODER_LAYOUT.keys())
 
     # load pre-trained bert model and tokenizer
-    if 'f' in config.layout:
-        BERT_CHECKPOINT = f'google/bert_uncased_L-{str(NUM_HIDDEN_LAYERS)}_H-256_A-4'
+    if config.random_init:
+        BERT_CHECKPOINT = f'google/bert_uncased_L-{str(NUM_HIDDEN_LAYERS)}_H-768_A-12'
         tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH * MAX_NEIGHBORS)
         bert_model = AutoModelForMaskedLM.from_pretrained(BERT_CHECKPOINT)
     else:
@@ -100,14 +102,14 @@ def prepare_decoder():
     tdo_model.lm_head.bias = copy.deepcopy(bert_model.cls.predictions.bias)
 
     # save model
-    tdo_model.save_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
+    tdo_model.save_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}-{config.description}')
 
     # save tokenizer
-    tokenizer.save_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
+    tokenizer.save_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}-{config.description}')
 
     # re-load model
-    tdo_model = TDOForMaskedLM.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
-    tdo_tokenizer = AutoTokenizer.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}')
+    tdo_model = TDOForMaskedLM.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}-{config.description}')
+    tdo_tokenizer = AutoTokenizer.from_pretrained(f'{MODEL_DIR}/PLMs/text-decoder-only-{config.layout}-{config.description}')
     print(f'TDO model with layout {config.layout} is ready to run!')
 
 

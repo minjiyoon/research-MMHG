@@ -9,7 +9,7 @@
   "finetuning_task": null,
   "hidden_act": "gelu",
   "hidden_dropout_prob": 0.1,
-  "hidden_size": 256,
+  "hidden_size": 768,
   "id2label": {
     "0": "LABEL_0",
     "1": "LABEL_1"
@@ -50,6 +50,6 @@
   "torchscript": false,
   "type_vocab_size": 2,
   "use_bfloat16": false,
-  "vocab_size": 50000,
+  "vocab_size": 30522,
   "parameters": 136350720
 }

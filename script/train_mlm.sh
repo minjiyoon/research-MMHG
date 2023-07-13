@@ -1,13 +1,31 @@
+#!/usr/bin/env bash
+#SBATCH --partition=russ_reserved
+#SBATCH --job-name=MMHG
+#SBATCH --output=slurm_logs/train-mmhg-%j.out
+#SBATCH --error=slurm_logs/train-mmhg-%j.err
+#SBATCH --time=3-00:00:00
+#SBATCH --exclusive
+#SBATCH --gres=gpu:4
+#SBATCH --mem=250gb
+#SBATCH --exclude matrix-1-20,matrix-1-18,matrix-0-34 
+
+ulimit -c unlimited
+module load cuda-11.1.1
+
 export WANDB_PROJECT='MMHG'
 export PYTHONPATH=.
 
-DESCRIPTION='pretrain'
-LAYOUT='f8'
+DESCRIPTION='bert-init'
+LAYOUT='s1'
 
-python3 language_modelling/convert_bert_to_tdo.py --layout ${LAYOUT}
+python3 language_modelling/convert_bert_to_tdo.py \
+    --layout ${LAYOUT} \
+    --random_init False \
+    --description ${DESCRIPTION}
+
 
 python3 language_modelling/run_mlm_stream.py \
-    --model_name_or_path model/PLMs/text-decoder-only-${LAYOUT} \
+    --model_name_or_path model/PLMs/text-decoder-only-${LAYOUT}-${DESCRIPTION} \
     --dataset oag \
     --dataset_domain CS \
     --do_train \
@@ -19,11 +37,11 @@ python3 language_modelling/run_mlm_stream.py \
     --save_strategy epoch \
     --num_train_epochs 50 \
     --save_total_limit 5 \
-    --learning_rate 4e-4 \
-    --per_device_train_batch_size 128 \
-    --per_device_eval_batch_size 128 \
+    --learning_rate 2e-4 \
+    --per_device_train_batch_size 64 \
+    --per_device_eval_batch_size 64 \
     --gradient_accumulation_steps 1 \
-    --eval_accumulation_steps 32 \
+    --eval_accumulation_steps 16 \
     --dataloader_num_workers 32 \
     --lr_scheduler_type linear \
     --warmup_ratio 0.10 \

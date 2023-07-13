@@ -55,6 +55,8 @@ require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text
 
 logger = logging.getLogger(__name__)
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 @dataclass
 class DataTrainingArguments:
@@ -243,13 +245,9 @@ def main():
                 pooling=model_args.pooling,
                 config=config,
                 cache_dir=model_args.cache_dir)
-        no_neighbors = ("f8" in model_args.model_name_or_path)
 
     # Preprocessing the datasets
     def preprocess_function(examples):
-        #batch = tokenizer(examples['text'], padding='max_length', truncation=True, max_length=data_args.max_length)
-        #return batch
-
         batch = tokenizer(
                 examples["text"],
                 padding="max_length",
@@ -264,15 +262,14 @@ def main():
         encoder_attention_mask = []
         labels = []
         for seed_id in examples["id"]:
-            if no_neighbors is False:
-                outputs = raw_dataset.sample_computation_graph(seed_id)
-                encoder_hidden_states.append(outputs['feats'])
-                encoder_attention_mask.append(outputs['attention_mask'])
+            outputs = raw_dataset.sample_computation_graph(seed_id)
+            encoder_hidden_states.append(outputs['feats'])
+            encoder_attention_mask.append(outputs['attention_mask'])
             label = raw_dataset.get_label(seed_id)
             labels.append(label)
 
-        batch['encoder_hidden_states'] = None if no_neighbors else encoder_hidden_states
-        batch['encoder_attention_mask'] = None if no_neighbors else encoder_attention_mask
+        batch['encoder_hidden_states'] = encoder_hidden_states
+        batch['encoder_attention_mask'] = encoder_attention_mask
         batch['labels'] = labels
         return batch
 
