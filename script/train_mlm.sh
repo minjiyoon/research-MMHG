@@ -1,3 +1,4 @@
+export WANDB_PROJECT='MMHG'
 export PYTHONPATH=.
 
 DESCRIPTION='pretrain'
@@ -28,4 +29,6 @@ python3 language_modelling/run_mlm_stream.py \
     --warmup_ratio 0.10 \
     --weight_decay 0.01 \
     --mlm_probability 0.15 \
-    --pad_to_max_length  
+    --pad_to_max_length \
+    --report_to wandb \
+    --run_name ${LAYOUT}-mlm-${DESCRIPTION}

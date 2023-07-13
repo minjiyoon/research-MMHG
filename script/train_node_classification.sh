@@ -1,3 +1,4 @@
+export WANDB_PROJECT='MMHG'
 export PYTHONPATH=.
 
 DESCRIPTION='pretrain'
@@ -28,4 +29,6 @@ python language_modelling/run_node_classification.py \
     --per_device_train_batch_size 128 \
     --per_device_eval_batch_size 128 \
     --dataloader_num_workers 32 \
-    --pad_to_max_length
+    --pad_to_max_length \
+    --report_to wandb \
+    --run_name ${LAYOUT}-nc-${DESCRIPTION}
