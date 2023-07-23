@@ -15,16 +15,20 @@ module load cuda-11.1.1
 export WANDB_PROJECT='MMHG'
 export PYTHONPATH=.
 
-DESCRIPTION='no-pretrain'
+DESCRIPTION='position-layer'
 MODEL_NAME='text-decoder-only'
-LAYOUT='f8'
+LAYOUT='l1'
 POOLING_METHOD='cls'
 
 python language_modelling/run_node_classification.py \
-    --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT} \
+    --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT}-mlm-${DESCRIPTION} \
     --pooling ${POOLING_METHOD} \
     --dataset oag \
     --dataset_domain CS \
+    --sample_depth 2 \
+    --sample_num 2 \
+    --position_type layer \
+    --duplicate_encoding True \
     --do_train \
     --do_eval \
     --do_predict \

@@ -40,6 +40,8 @@ class TDOConfig(PretrainedConfig):
             Maximum number of tokens for the target node.
         max_neighbors (:obj:`int`, `optional`, defaults to 64):
             Maximum number of neighbors.
+        position_ids (:obj:`list'):
+            ids for position embeddings.
         encoder_layout (:obj:`Dict`):
             The sentence/document encoder layout.
         hidden_size (:obj:`int`, `optional`, defaults to 768):
@@ -88,7 +90,8 @@ class TDOConfig(PretrainedConfig):
         self,
         vocab_size=30522,
         max_length=64,
-        max_neighbors=64,
+        neighbor_max=64,
+        neighbor_hidden_size=768,
         encoder_layout=None,
         hidden_size=768,
         num_hidden_layers=12,
@@ -112,7 +115,8 @@ class TDOConfig(PretrainedConfig):
 
         self.vocab_size = vocab_size
         self.max_length = max_length
-        self.max_neighbors = max_neighbors
+        self.neighbor_max = neighbor_max
+        self.neighbor_hidden_size = neighbor_hidden_size
         self.encoder_layout = encoder_layout
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers

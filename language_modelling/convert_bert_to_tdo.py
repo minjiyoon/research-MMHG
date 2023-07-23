@@ -33,11 +33,11 @@ def prepare_decoder():
 
     # Required arguments
     parser.add_argument('--description', default='default')
-    parser.add_argument('--random_init', default=False)
+    parser.add_argument('--random_init', default='True')
     parser.add_argument('--layout', default='s1', choices=['s1', 's2', 'p1', 'p2', 'e1', 'e2',
                                                            'l1', 'l2', 'b1', 'b2', 'f12', 'f8', 'f6'],
                         help='S|D encoders layout')
-    parser.add_argument('--max_length', default=64)
+    parser.add_argument('--max_length', default=512)
     parser.add_argument('--max_neighbors', default=64)
     config = parser.parse_args()
 
@@ -50,13 +50,14 @@ def prepare_decoder():
     NUM_HIDDEN_LAYERS = len(ENCODER_LAYOUT.keys())
 
     # load pre-trained bert model and tokenizer
-    if config.random_init:
-        BERT_CHECKPOINT = f'google/bert_uncased_L-{str(NUM_HIDDEN_LAYERS)}_H-768_A-12'
-        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH * MAX_NEIGHBORS)
+    if config.random_init == 'True':
+        BERT_LAYERS = NUM_HIDDEN_LAYERS + 1 if NUM_HIDDEN_LAYERS % 2 else NUM_HIDDEN_LAYERS
+        BERT_CHECKPOINT = f'google/bert_uncased_L-{str(BERT_LAYERS)}_H-768_A-12'
+        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH)
         bert_model = AutoModelForMaskedLM.from_pretrained(BERT_CHECKPOINT)
     else:
         BERT_CHECKPOINT = f'patrickvonplaten/bert2bert_cnn_daily_mail'
-        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH * MAX_NEIGHBORS)
+        tokenizer = AutoTokenizer.from_pretrained(BERT_CHECKPOINT, model_max_length=MAX_LENGTH)
         bert_model = EncoderDecoderModel.from_pretrained(BERT_CHECKPOINT).decoder
 
     # load dummy config and change specifications
@@ -67,6 +68,9 @@ def prepare_decoder():
     tdo_config.max_neighbors = MAX_NEIGHBORS
     tdo_config.max_position_embeddings = MAX_LENGTH
     tdo_config.num_hidden_layers = NUM_HIDDEN_LAYERS
+    # Neighbor parameters
+    tdo_config.neighbor_max = MAX_NEIGHBORS
+    tdo_config.neighbor_hidden_size = bert_config.hidden_size
     # Transformer parameters
     tdo_config.hidden_size = bert_config.hidden_size
     tdo_config.intermediate_size = bert_config.intermediate_size

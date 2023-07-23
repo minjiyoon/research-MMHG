@@ -418,9 +418,15 @@ class TDOModel(TDOPreTrainedModel):
 
         self.embeddings = TDOEmbeddings(config)
         self.decoder = TDODecoder(config)
+        self.neighbor_position = False
+        self.neighbor_position_embeddings = nn.Embedding(config.neighbor_max, config.neighbor_hidden_size)
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def set_neighbor_position_ids(self, position_ids):
+        self.neighbor_position = True
+        self.register_buffer("neighbor_position_ids", torch.tensor(position_ids, dtype=torch.long).expand((1, -1)), persistent=False)
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -499,6 +505,10 @@ class TDOModel(TDOPreTrainedModel):
             position_ids=position_ids,
             token_type_ids=token_type_ids,
         )
+        if encoder_hidden_states is not None and self.neighbor_position is True:
+            neighbor_position_embeddings = self.neighbor_position_embeddings(self.neighbor_position_ids)
+            encoder_hidden_states = encoder_hidden_states + neighbor_position_embeddings
+
         decoder_outputs = self.decoder(
             embedding_output,
             attention_mask=extended_attention_mask,

@@ -47,6 +47,8 @@ from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 from data import OAGDataset
 from sklearn.metrics import f1_score
 
+import wandb
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
 
@@ -65,7 +67,7 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-    max_length: Optional[int] = field(
+    seq_max_length: Optional[int] = field(
         default=64, metadata={"help": "The maximum total input sequence length after tokenization."}
     )
     overwrite_cache: Optional[bool] = field(
@@ -103,15 +105,17 @@ class DataTrainingArguments:
         default='L1', metadata={"help": "Label type for the node classification."}
     )
     sample_depth: Optional[int] = field(
-        default=2, metadata={"help": "neighborhood hops for the computation graph sampling."}
+        default=1, metadata={"help": "neighborhood hops for the computation graph sampling."}
     )
     sample_num: Optional[int] = field(
-        default=2, metadata={"help": "number of neighbors to sample per node."}
+        default=5, metadata={"help": "number of neighbors to sample per node."}
     )
-
-    server_ip: Optional[str] = field(default=None, metadata={"help": "For distant debugging."})
-    server_port: Optional[str] = field(default=None, metadata={"help": "For distant debugging."})
-
+    position_type: Optional[str] = field(
+        default='no_position', metadata={"help": "position encoding methods for neighbors (node_type, layer, layer_node_type, metapath)."}
+    )
+    duplicate_encoding: Optional[bool] = field(
+        default=False, metadata={"help": "how to encode computation graphs"}
+    )
 
 @dataclass
 class ModelArguments:
@@ -123,7 +127,7 @@ class ModelArguments:
         default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     pooling: str = field(
-        default='max', metadata={"help": "Which pooling method to use (max, cls, attentive)."}
+        default='cls', metadata={"help": "Which pooling method to use (max, cls, attentive)."}
     )
     cache_dir: Optional[str] = field(
         default=None,
@@ -158,14 +162,11 @@ def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # Setup distant debugging if needed
-    if data_args.server_ip and data_args.server_port:
-        # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
-        import ptvsd
-
-        print("Waiting for debugger attach")
-        ptvsd.enable_attach(address=(data_args.server_ip, data_args.server_port), redirect_output=True)
-        ptvsd.wait_for_attach()
+    if data_args.duplicate_encoding is False and data_args.position_type != "no_position":
+        raise ValueError(
+                f"duplicate_encoding: {data_args.duplicate_encoding} and "
+                + f"position_type: {data_args.position_type} cannot be set together"
+            )
 
     # Setup logging
     logging.basicConfig(
@@ -213,8 +214,17 @@ def main():
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     if "text-decoder-only" in model_args.model_name_or_path:
-        config = TDOConfig.from_pretrained(model_args.model_name_or_path, cache_dir=model_args.cache_dir)
-        model = TDOForMaskedLM.from_pretrained(model_args.model_name_or_path, config=config, cache_dir=model_args.cache_dir)
+        config = TDOConfig.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=model_args.cache_dir)
+
+        model = TDOForMaskedLM.from_pretrained(
+                model_args.model_name_or_path,
+                config=config,
+                cache_dir=model_args.cache_dir)
+        if data_args.position_type != "no_position":
+            model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
+
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
@@ -224,7 +234,7 @@ def main():
                 examples["text"],
                 padding="max_length",
                 truncation=True,
-                max_length=data_args.max_length,
+                max_length=data_args.seq_max_length,
                 # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
                 # receives the `special_tokens_mask`.
                 return_special_tokens_mask=True,
@@ -234,7 +244,10 @@ def main():
         encoder_attention_mask = []
         labels = []
         for seed_id in examples["id"]:
-            outputs = raw_dataset.sample_computation_graph(seed_id)
+            if data_args.duplicate_encoding is True:
+                outputs = raw_dataset.sample_dup_computation_graph(seed_id)
+            else:
+                outputs = raw_dataset.sample_computation_graph(seed_id)
             encoder_hidden_states.append(outputs['feats'])
             encoder_attention_mask.append(outputs['attention_mask'])
             label = raw_dataset.get_label(seed_id)
@@ -294,7 +307,7 @@ def main():
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm_probability=data_args.mlm_probability,
-        pad_to_multiple_of=data_args.max_length,
+        pad_to_multiple_of=data_args.seq_max_length,
     )
 
     # Initialize our Trainer
@@ -337,6 +350,11 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
+    # Wandb logging
+    combined_args = {**vars(data_args), **vars(model_args)}
+    wandb.config.update(combined_args)
+
+
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "fill-mask"}
     if data_args.dataset is not None:
         kwargs["dataset_tags"] = data_args.dataset
@@ -346,8 +364,6 @@ def main():
         else:
             kwargs["dataset"] = data_args.dataset
 
-    # Needed to avoid TPU hanging
-    sys.exit()
 
 if __name__ == "__main__":
     main()
