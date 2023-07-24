@@ -12,6 +12,7 @@
 # limitations under the License.
 """PyTorch Decoder-only model."""
 
+import math
 import torch
 import torch.utils.checkpoint
 from packaging import version
@@ -122,17 +123,33 @@ class TDOEmbeddings(nn.Module):
 
 
 class TDOLayer(nn.Module):
-    def __init__(self, config, is_decoder):
+    def __init__(self, config, is_decoder, is_lora):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = BertAttention(config)
+        self.is_lora = is_lora
         self.is_decoder = is_decoder
         self.add_cross_attention = (is_decoder and config.add_cross_attention)
         if is_decoder:
-            self.crossattention = BertAttention(config, position_embedding_type="absolute")
+            if is_lora:
+                if config.lora_dropout > 0.0:
+                    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+                else:
+                    self.lora_dropout = nn.Identity()
+                self.lora_scaling = config.lora_alpha / config.lora_r
+                self.lora_A = nn.Linear(config.neighbor_max, config.lora_r, bias=False)
+                self.lora_B = nn.Linear(config.lora_r, config.max_seq_length, bias=False)
+                self.reset_lora_parameters()
+            else:
+                # WHAT IS THIS ABOLUSTE POSITION_EMBEDDING_TYPE?
+                self.crossattention = BertAttention(config, position_embedding_type="absolute")
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
+
+    def reset_lora_parameters(self):
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
 
     def forward(
         self,
@@ -142,16 +159,27 @@ class TDOLayer(nn.Module):
         encoder_attention_mask=None,
         output_attentions=False,
     ):
+        if not self.is_decoder or (self.is_decoder and not self.is_lora):
+            self_attention_outputs = self.attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+            )
+        else:
+            # LORA
+            new_encoder_hidden_states = hidden_states + self.lora_B(self.lora_A(self.lora_dropout(encoder_hidden_states))) * self.scaling
+            self_attention_outputs = self.attention(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=new_encoder_hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    output_attentions=output_attentions,
+                )
 
-        self_attention_outputs = self.attention(
-            hidden_states,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-        )
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:-1]
 
-        if self.is_decoder:
+        if self.is_decoder and not self.is_lora:
             cross_attention_outputs = self.crossattention(
                     attention_output,
                     attention_mask=attention_mask,
@@ -180,8 +208,10 @@ class TDODecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([TDOLayer(config, is_decoder=self.config.encoder_layout[str(idx)]['crossattention'])
-                                        for idx in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([TDOLayer(config,
+                                             is_decoder=self.config.encoder_layout[str(idx)]['crossattention'],
+                                             is_lora=self.config.is_lora)
+                                    for idx in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(

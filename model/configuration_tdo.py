@@ -89,9 +89,17 @@ class TDOConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=30522,
-        max_length=64,
+        max_length=512,
+        max_seq_length=64,
+        # Neighbor parameters
         neighbor_max=64,
         neighbor_hidden_size=768,
+        # LORA parameters
+        is_lora=False,
+        lora_r=64,
+        lora_alpha=1,
+        lora_dropout=0.0,
+        # Transformer parameters
         encoder_layout=None,
         hidden_size=768,
         num_hidden_layers=12,
@@ -115,8 +123,13 @@ class TDOConfig(PretrainedConfig):
 
         self.vocab_size = vocab_size
         self.max_length = max_length
+        self.max_seq_length = max_seq_length
         self.neighbor_max = neighbor_max
         self.neighbor_hidden_size = neighbor_hidden_size
+        self.is_lora = is_lora
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
         self.encoder_layout = encoder_layout
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers

@@ -38,11 +38,17 @@ def prepare_decoder():
                                                            'l1', 'l2', 'b1', 'b2', 'f12', 'f8', 'f6'],
                         help='S|D encoders layout')
     parser.add_argument('--max_length', default=512)
+    parser.add_argument('--max_seq_length', default=64)
     parser.add_argument('--max_neighbors', default=64)
+
+    parser.add_argument('--lora', dest='is_lora', action='store_true')
+    parser.set_defaults(is_lora=False)
     config = parser.parse_args()
 
     MAX_LENGTH = int(config.max_length)
+    MAX_SEQ_LENGTH = int(config.max_seq_length)
     MAX_NEIGHBORS = int(config.max_neighbors)
+    IS_LORA = bool(config.is_lora)
     ENCODER_LAYOUT = {}
     for idx, block_pattern in enumerate(LAYOUTS[config.layout].split('|')):
         ENCODER_LAYOUT[str(idx)] = {"attention": True if 'S' in block_pattern else False,
@@ -65,12 +71,15 @@ def prepare_decoder():
     tdo_config = TDOConfig.from_pretrained(f'{MODEL_DIR}/tdo')
     # Text length parameters
     tdo_config.max_length = MAX_LENGTH
+    tdo_config.max_seq_length = MAX_SEQ_LENGTH
     tdo_config.max_neighbors = MAX_NEIGHBORS
     tdo_config.max_position_embeddings = MAX_LENGTH
     tdo_config.num_hidden_layers = NUM_HIDDEN_LAYERS
     # Neighbor parameters
     tdo_config.neighbor_max = MAX_NEIGHBORS
     tdo_config.neighbor_hidden_size = bert_config.hidden_size
+    # LORA parameters
+    tdo_config.is_lora = IS_LORA
     # Transformer parameters
     tdo_config.hidden_size = bert_config.hidden_size
     tdo_config.intermediate_size = bert_config.intermediate_size

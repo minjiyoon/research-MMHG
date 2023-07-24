@@ -67,9 +67,6 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-    seq_max_length: Optional[int] = field(
-        default=64, metadata={"help": "The maximum total input sequence length after tokenization."}
-    )
     overwrite_cache: Optional[bool] = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
     )
@@ -234,7 +231,7 @@ def main():
                 examples["text"],
                 padding="max_length",
                 truncation=True,
-                max_length=data_args.seq_max_length,
+                max_length=config.max_seq_length,
                 # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
                 # receives the `special_tokens_mask`.
                 return_special_tokens_mask=True,
@@ -307,7 +304,7 @@ def main():
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm_probability=data_args.mlm_probability,
-        pad_to_multiple_of=data_args.seq_max_length,
+        pad_to_multiple_of=config.max_seq_length,
     )
 
     # Initialize our Trainer
