@@ -122,17 +122,152 @@ class TDOEmbeddings(nn.Module):
         return embeddings
 
 
+class LORASelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+            raise ValueError(
+                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
+                f"heads ({config.num_attention_heads})"
+            )
+
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        #self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        if config.lora_dropout > 0.0:
+            self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+        else:
+            self.lora_dropout = nn.Identity()
+        self.lora_scaling = config.lora_alpha / config.lora_r
+        self.lora_A = nn.Linear(config.hidden_size, config.lora_r, bias=False)
+        self.lora_B = nn.Linear(config.lora_r, self.all_head_size, bias=False)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[torch.Tensor]:
+        mixed_query_layer = self.query(hidden_states)
+
+        # If this is instantiated as a cross-attention module, the keys
+        # and values come from an encoder; the attention mask needs to be
+        # such that the encoder's padding tokens are not attended to.
+        is_cross_attention = encoder_hidden_states is not None
+
+        if is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            #value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            encoder_hidden_states = self.lora_B(self.lora_A(self.lora_dropout(encoder_hidden_states))) * self.lora_scaling
+            value_layer = self.transpose_for_scores(encoder_hidden_states)
+            attention_mask = encoder_attention_mask
+        else:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attention_mask is not None:
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(new_context_layer_shape)
+
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+
+        return outputs
+
+
+class LORASelfOutput(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        #if config.lora_dropout > 0.0:
+        #    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+        #else:
+        #    self.lora_dropout = nn.Identity()
+        #self.lora_scaling = config.lora_alpha / config.lora_r
+        #self.lora_A = nn.Linear(config.hidden_size, config.lora_r, bias=False)
+        #self.lora_B = nn.Linear(config.lora_r, config.hidden_size, bias=False)
+
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        #hidden_states = self.lora_B(self.lora_A(self.lora_dropout(hidden_states))) * self.lora_scaling
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+class LORAAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.self = LORASelfAttention(config)
+        self.output = LORASelfOutput(config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[torch.Tensor]:
+        self_outputs = self.self(
+            hidden_states,
+            attention_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            output_attentions,
+        )
+        attention_output = self.output(self_outputs[0], hidden_states)
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
+
+
 class TDOLayer(nn.Module):
-    def __init__(self, config, is_decoder, is_lora):
+    def __init__(self, config, is_decoder, lora_type):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = BertAttention(config)
-        self.is_lora = is_lora
+        self.lora_type = lora_type
         self.is_decoder = is_decoder
         self.add_cross_attention = (is_decoder and config.add_cross_attention)
         if is_decoder:
-            if is_lora:
+            if lora_type == 'none':
+                self.crossattention = BertAttention(config, position_embedding_type="absolute")
+            elif lora_type == 'naive':
                 if config.lora_dropout > 0.0:
                     self.lora_dropout = nn.Dropout(p=config.lora_dropout)
                 else:
@@ -140,16 +275,13 @@ class TDOLayer(nn.Module):
                 self.lora_scaling = config.lora_alpha / config.lora_r
                 self.lora_A = nn.Linear(config.neighbor_max, config.lora_r, bias=False)
                 self.lora_B = nn.Linear(config.lora_r, config.max_seq_length, bias=False)
-                self.reset_lora_parameters()
-            else:
-                # WHAT IS THIS ABOLUSTE POSITION_EMBEDDING_TYPE?
-                self.crossattention = BertAttention(config, position_embedding_type="absolute")
+            elif lora_type == 'cross_attention':
+                self.crossattention = LORAAttention(config)
+            elif lora_type == 'self_attention':
+                self.self_crossattention = LORAAttention(config)
+
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
-
-    def reset_lora_parameters(self):
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B.weight)
 
     def forward(
         self,
@@ -159,15 +291,36 @@ class TDOLayer(nn.Module):
         encoder_attention_mask=None,
         output_attentions=False,
     ):
-        if not self.is_decoder or (self.is_decoder and not self.is_lora):
+        if not self.is_decoder or (self.is_decoder and self.lora_type == 'none'):
             self_attention_outputs = self.attention(
                 hidden_states,
                 attention_mask=attention_mask,
                 output_attentions=output_attentions,
             )
-        else:
-            # LORA
-            new_encoder_hidden_states = hidden_states + self.lora_B(self.lora_A(self.lora_dropout(encoder_hidden_states))) * self.scaling
+        elif self.is_decoder and self.lora_type == 'naive':
+            new_encoder_hidden_states = self.lora_B(self.lora_A(self.lora_dropout(encoder_hidden_states.transpose(-1, -2)))) * self.lora_scaling
+            new_encoder_hidden_states = hidden_states + new_encoder_hidden_states.transpose(-1, -2)
+            self_attention_outputs = self.attention(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=new_encoder_hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    output_attentions=output_attentions,
+                )
+        elif self.is_decoder and self.lora_type == 'cross_attention':
+            self_attention_outputs = self.attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+            )
+        elif self.is_decoder and self.lora_type == 'self_attention':
+            self_cross_attention_outputs = self.self_crossattention(hidden_states,
+                                                            attention_mask=attention_mask,
+                                                            encoder_hidden_states=encoder_hidden_states,
+                                                            encoder_attention_mask=encoder_attention_mask,
+                                                            output_attentions=output_attentions,
+                                                            )
+            new_encoder_hidden_states = hidden_states + self_cross_attention_outputs[0]
             self_attention_outputs = self.attention(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -179,7 +332,17 @@ class TDOLayer(nn.Module):
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:-1]
 
-        if self.is_decoder and not self.is_lora:
+        if self.is_decoder and self.lora_type == 'none':
+            cross_attention_outputs = self.crossattention(
+                    attention_output,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    output_attentions=output_attentions,
+                )
+            attention_output = cross_attention_outputs[0]
+            outputs = outputs + cross_attention_outputs[1:-1]
+        elif self.is_decoder and self.lora_type == 'cross_attention':
             cross_attention_outputs = self.crossattention(
                     attention_output,
                     attention_mask=attention_mask,
@@ -210,7 +373,7 @@ class TDODecoder(nn.Module):
         self.config = config
         self.layer = nn.ModuleList([TDOLayer(config,
                                              is_decoder=self.config.encoder_layout[str(idx)]['crossattention'],
-                                             is_lora=self.config.is_lora)
+                                             lora_type=self.config.lora_type)
                                     for idx in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
@@ -589,6 +752,33 @@ class TDOLMHead(nn.Module):
         self.bias = self.decoder.bias
 
 
+def reset_lora_parameters(model):
+    for n, p in model.named_parameters():
+        if "lora_A" in n:
+            nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+        if "lora_B" in n:
+            nn.init.zeros_(p)
+
+
+def mark_only_lora_as_trainable(model: nn.Module, bias: str = "lora_only") -> None:
+    for n, p in model.named_parameters():
+        if "lora_" not in n:
+            p.requires_grad = False
+    if bias == "none":
+        return
+    elif bias == "all":
+        for n, p in model.named_parameters():
+            if "bias" in n:
+                p.requires_grad = True
+    elif bias == "lora_only":
+        for m in model.modules():
+            if isinstance(m, LORAAttention):
+                for n, p in m.named_parameters():
+                    p.requires_grad = True
+    else:
+        raise NotImplementedError
+
+
 @add_start_docstrings("""TDO Model with a `language modeling` head on top.""", TDO_START_DOCSTRING)
 class TDOForMaskedLM(TDOPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
@@ -602,6 +792,9 @@ class TDOForMaskedLM(TDOPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        if config.lora_type != 'none':
+            reset_lora_parameters(self.text_decoder)
+            mark_only_lora_as_trainable(self.text_decoder)
 
     def get_output_embeddings(self):
         return self.lm_head.decoder
@@ -722,6 +915,9 @@ class TDOForSequenceClassification(TDOPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        if config.lora_type != 'none':
+            reset_lora_parameters(self.text_decoder)
+            mark_only_lora_as_trainable(self.text_decoder)
 
     @add_start_docstrings_to_model_forward(TDO_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(

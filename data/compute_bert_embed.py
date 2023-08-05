@@ -1,10 +1,8 @@
 import dill
-import os
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
 import numpy as np
-import h5py
 from tqdm import tqdm
 
 from transformers import BertTokenizer, XLNetTokenizer

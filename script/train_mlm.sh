@@ -13,17 +13,20 @@ ulimit -c unlimited
 module load cuda-11.1.1
 
 export WANDB_PROJECT='MMHG'
+export WANDB_WATCH='all'
 export PYTHONPATH=.
 
-DESCRIPTION='no-position'
+POSITION_TYPE='metapath'
+LORA_TYPE='self_attention'
 RANDOM_INIT='True'
 LAYOUT='l1'
+DESCRIPTION=lora-${LORA_TYPE}-no-out-fft
 
 python3 language_modelling/convert_bert_to_tdo.py \
     --layout ${LAYOUT} \
     --random_init ${RANDOM_INIT} \
-    --description ${DESCRIPTION}
-
+    --description ${DESCRIPTION} \
+    --lora_type ${LORA_TYPE}
 
 python3 language_modelling/run_mlm_stream.py \
     --model_name_or_path model/PLMs/text-decoder-only-${LAYOUT}-${DESCRIPTION} \
@@ -31,8 +34,8 @@ python3 language_modelling/run_mlm_stream.py \
     --dataset_domain CS \
     --sample_depth 2 \
     --sample_num 2 \
-    --position_type no_position \
-    --duplicate_encoding False \
+    --position_type ${POSITION_TYPE} \
+    --duplicate_encoding True \
     --do_train \
     --do_eval \
     --output_dir model/PLMs/text-decoder-only-${LAYOUT}-mlm-${DESCRIPTION} \

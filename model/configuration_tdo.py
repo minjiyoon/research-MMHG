@@ -95,7 +95,7 @@ class TDOConfig(PretrainedConfig):
         neighbor_max=64,
         neighbor_hidden_size=768,
         # LORA parameters
-        is_lora=False,
+        lora_type='none',
         lora_r=64,
         lora_alpha=1,
         lora_dropout=0.0,
@@ -126,7 +126,7 @@ class TDOConfig(PretrainedConfig):
         self.max_seq_length = max_seq_length
         self.neighbor_max = neighbor_max
         self.neighbor_hidden_size = neighbor_hidden_size
-        self.is_lora = is_lora
+        self.lora_type = lora_type
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout

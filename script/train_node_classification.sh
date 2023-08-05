@@ -15,10 +15,12 @@ module load cuda-11.1.1
 export WANDB_PROJECT='MMHG'
 export PYTHONPATH=.
 
-DESCRIPTION='position-layer'
+POSITION_TYPE='indiv'
+LORA_TYPE='none'
 MODEL_NAME='text-decoder-only'
 LAYOUT='l1'
 POOLING_METHOD='cls'
+DESCRIPTION=position-${POSITION_TYPE}
 
 python language_modelling/run_node_classification.py \
     --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT}-mlm-${DESCRIPTION} \
@@ -27,7 +29,7 @@ python language_modelling/run_node_classification.py \
     --dataset_domain CS \
     --sample_depth 2 \
     --sample_num 2 \
-    --position_type layer \
+    --position_type ${POSITION_TYPE} \
     --duplicate_encoding True \
     --do_train \
     --do_eval \

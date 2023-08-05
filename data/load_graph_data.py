@@ -227,10 +227,10 @@ class OAGDataset:
                 sampled_feats.append(torch.FloatTensor(self.df_nodes[node_type][node_id]))
                 sampled_attention_mask.append(1)
         sampled_feats = torch.stack(sampled_feats, dim=0)
-        sampled_attention_mask = torch.LongTensor((sampled_feats.shape[0]))
+        sampled_attention_mask = torch.LongTensor(sampled_attention_mask)
 
         assert sampled_feats.shape[0] == self.max_neighbors
-        return {'feats': feats, 'attention_mask': attention_mask}
+        return {'feats': sampled_feats, 'attention_mask': sampled_attention_mask}
 
 
     def get_label(self, seed_id):

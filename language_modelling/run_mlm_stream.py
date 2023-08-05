@@ -263,7 +263,7 @@ def main():
             batch_size=256,
             writer_batch_size=256,
             load_from_cache_file=not data_args.overwrite_cache,
-            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}",
+            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}_{data_args.duplicate_encoding}",
             desc="Sampling computation graphs on dataset",
             #num_proc=30
         )
