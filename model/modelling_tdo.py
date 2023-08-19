@@ -276,9 +276,12 @@ class TDOLayer(nn.Module):
                 self.lora_A = nn.Linear(config.neighbor_max, config.lora_r, bias=False)
                 self.lora_B = nn.Linear(config.lora_r, config.max_seq_length, bias=False)
             elif lora_type == 'cross_attention':
+                #self.crossattention = BertAttention(config)
                 self.crossattention = LORAAttention(config)
             elif lora_type == 'self_attention':
-                self.self_crossattention = LORAAttention(config)
+                self.self_cross_attention = LORAAttention(config)
+            elif lora_type == 'self_cross_attention':
+                self.self_cross_attention = LORAAttention(config)
 
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
@@ -314,7 +317,7 @@ class TDOLayer(nn.Module):
                 output_attentions=output_attentions,
             )
         elif self.is_decoder and self.lora_type == 'self_attention':
-            self_cross_attention_outputs = self.self_crossattention(hidden_states,
+            self_cross_attention_outputs = self.self_cross_attention(hidden_states,
                                                             attention_mask=attention_mask,
                                                             encoder_hidden_states=encoder_hidden_states,
                                                             encoder_attention_mask=encoder_attention_mask,
@@ -328,6 +331,12 @@ class TDOLayer(nn.Module):
                     encoder_attention_mask=attention_mask,
                     output_attentions=output_attentions,
                 )
+        elif self.is_decoder and self.lora_type == 'self_cross_attention':
+            self_attention_outputs = self.attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+            )
 
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:-1]
@@ -352,6 +361,21 @@ class TDOLayer(nn.Module):
                 )
             attention_output = cross_attention_outputs[0]
             outputs = outputs + cross_attention_outputs[1:-1]
+        elif self.is_decoder and self.lora_type == 'self_cross_attention':
+            self_cross_attention_outputs = self.self_cross_attention(attention_output,
+                                                            attention_mask=attention_mask,
+                                                            encoder_hidden_states=encoder_hidden_states,
+                                                            encoder_attention_mask=encoder_attention_mask,
+                                                            output_attentions=output_attentions,
+                                                            )
+            new_encoder_hidden_states = hidden_states + self_cross_attention_outputs[0]
+            self_attention_outputs = self.attention(
+                    attention_output,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=new_encoder_hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    output_attentions=output_attentions,
+                )
 
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
@@ -794,6 +818,7 @@ class TDOForMaskedLM(TDOPreTrainedModel):
         self.post_init()
         if config.lora_type != 'none':
             reset_lora_parameters(self.text_decoder)
+            # fft
             mark_only_lora_as_trainable(self.text_decoder)
 
     def get_output_embeddings(self):
@@ -917,6 +942,7 @@ class TDOForSequenceClassification(TDOPreTrainedModel):
         self.post_init()
         if config.lora_type != 'none':
             reset_lora_parameters(self.text_decoder)
+            # fft
             mark_only_lora_as_trainable(self.text_decoder)
 
     @add_start_docstrings_to_model_forward(TDO_INPUTS_DOCSTRING.format("batch_size, sequence_length"))

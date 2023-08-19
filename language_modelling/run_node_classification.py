@@ -283,7 +283,7 @@ def main():
             batch_size=256,
             writer_batch_size=256,
             load_from_cache_file=not data_args.overwrite_cache,
-            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}",
+            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}_{data_args.duplicate_encoding}",
             desc="Sampling computation graphs on dataset",
             #num_proc=30
         )
@@ -335,6 +335,13 @@ def main():
         callbacks=[EarlyStoppingCallback(early_stopping_patience=5)]
     )
 
+    # Initial evaluation
+    logger.info("*** Initial Evaluate ***")
+    metrics = trainer.evaluate(eval_dataset=eval_dataset)
+    metrics["eval_samples"] = eval_samples
+    trainer.log_metrics("eval", metrics)
+    trainer.save_metrics("eval", metrics)
+
     # Training
     if training_args.do_train:
         checkpoint = None
@@ -380,6 +387,13 @@ def main():
     # Wandb logging
     combined_args = {**vars(data_args), **vars(model_args)}
     wandb.config.update(combined_args)
+
+    total_params = sum(param.numel() for param in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    wandb.config.update({"total_params": total_params})
+    wandb.config.update({"trainable_params": trainable_params})
+    wandb.run.summary["Total Parameters"] = total_params
+    wandb.run.summary["Trainable Parameters"] = trainable_params
 
 
 if __name__ == "__main__":

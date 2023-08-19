@@ -14,44 +14,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Finetuning document classification models"""
+""" Finetuning summary generation models"""
+import wandb
 import logging
 import math
 import os
 import random
 import sys
+from time import perf_counter
+
 from dataclasses import dataclass, field
 from typing import Optional
 
-import datasets
-from datasets import load_metric
 import numpy as np
 from scipy.special import expit
 
+import torch
+import datasets
+from datasets import load_dataset
 import transformers
 from transformers import (
     AutoConfig,
     AutoTokenizer,
-    AutoModelForSequenceClassification,
+    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     HfArgumentParser,
     Trainer,
+    Seq2SeqTrainer,
     TrainingArguments,
+    Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
-from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
-from data import OAGDataset
-from sklearn.metrics import f1_score
+import evaluate
+from wikiweb2m.cider import Cider
 
-import wandb
+#from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
-
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
 logger = logging.getLogger(__name__)
@@ -81,26 +87,16 @@ class DataTrainingArguments:
         default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
     )
 
-    train_ratio: Optional[float] = field(
-        default=0.5, metadata={"help": "Ratio of the training set"}
-    )
-    eval_ratio: Optional[float] = field(
-        default=0.1, metadata={"help": "Ratio of the evaluation set"}
-    )
-    predict_ratio: Optional[float] = field(
-        default=0.4, metadata={"help": "Ratio of the prediction set"}
-    )
-
     dataset: Optional[str] = field(
-        default='oag', metadata={"help": "The name of the dataset to use (via the datasets library)."}
+        default='wikiweb2m', metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
-    dataset_domain: Optional[str] = field(
-        default='CS', metadata={"help": "The domain of OAG datasets"}
+    task: Optional[str] = field(
+        default='section_summarization', metadata={"help": "The domain of OAG datasets"}
+    )
+    context: Optional[str] = field(
+        default='section_only', metadata={"help": "The domain of OAG datasets"}
     )
 
-    label_type: Optional[str] = field(
-        default='L1', metadata={"help": "Label type for the node classification."}
-    )
     sample_depth: Optional[int] = field(
         default=1, metadata={"help": "neighborhood hops for the computation graph sampling."}
     )
@@ -156,7 +152,7 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     if data_args.duplicate_encoding is False and data_args.position_type != "no_position":
@@ -204,13 +200,14 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    raw_dataset = OAGDataset(data_args)
-    dataset = raw_dataset.load_dataset()
-
     # Load pretrained model and tokenizer
-    # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
-    # download model & vocab.
-    if "text-decoder-only" in model_args.model_name_or_path:
+    if "t5" in model_args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_args.model_name_or_path)
+    elif "opt" in model_args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path)
+    else:
         config = TDOConfig.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=model_args.cache_dir)
@@ -223,107 +220,71 @@ def main():
             model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
 
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-        tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+    tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
-    # Preprocessing the datasets
+    prefix = "summarize: "
     def preprocess_function(examples):
-        batch = tokenizer(
-                examples["text"],
-                padding="max_length",
-                truncation=True,
-                max_length=config.max_seq_length,
-                # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
-                # receives the `special_tokens_mask`.
-                return_special_tokens_mask=True,
-                )
+        inputs = [prefix + section_text for section_text in examples["section_rest_sentence"]]
+        model_inputs = tokenizer(inputs, padding='longest', max_length=1024, truncation=True, return_tensors="pt")
 
-        encoder_hidden_states = []
-        encoder_attention_mask = []
-        labels = []
-        for seed_id in examples["id"]:
-            if data_args.duplicate_encoding is True:
-                outputs = raw_dataset.sample_dup_computation_graph(seed_id)
-            else:
-                outputs = raw_dataset.sample_computation_graph(seed_id)
-            encoder_hidden_states.append(outputs['feats'])
-            encoder_attention_mask.append(outputs['attention_mask'])
-            label = raw_dataset.get_label(seed_id)
-            labels.append(label)
+        text_target = examples["section_clean_1st_sentence"]
+        labels = tokenizer(text_target, padding='longest', max_length=128, truncation=True, return_tensors="pt")
 
-        batch['encoder_hidden_states'] =  encoder_hidden_states
-        batch['encoder_attention_mask'] =  encoder_attention_mask
-        batch['labels'] = labels
-        return batch
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
 
+    dataset = load_dataset("parquet", data_files={"train": f"./wikiweb2m/raw/{data_args.task}_train.parquet",
+                                                "val": f"./wikiweb2m/raw/{data_args.task}_val.parquet",
+                                                "test": f"./wikiweb2m/raw/{data_args.task}_test.parquet"})
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
         dataset = dataset.map(
             preprocess_function,
             batched=True,
-            batch_size=256,
-            writer_batch_size=256,
+            batch_size=1024,
+            writer_batch_size=1024,
             load_from_cache_file=not data_args.overwrite_cache,
-            cache_file_name=f"oag_{data_args.sample_depth}_{data_args.sample_num}_{data_args.duplicate_encoding}",
-            desc="Sampling computation graphs on dataset",
-            #num_proc=30
+            cache_file_names={"train": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_train",
+                                "val": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_val",
+                                "test": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_test"},
+            desc="Preprocessing WikiWeb2M dataset",
         )
 
-    # Log a few random samples from the training set:
-    for index in random.sample(range(len(dataset)), 3):
-        logger.info(f"Sample {index} of the dataset: {dataset[index]}.")
+    rouge = evaluate.load("rouge")
+    bleu = evaluate.load("bleu")
 
-    # Use prediction set during pretraining
-    train_samples = int(data_args.train_ratio * len(dataset)) +  int(data_args.predict_ratio * len(dataset))
-    train_dataset = dataset.select(range(train_samples))
+    def compute_metrics1(eval_pred):
+        predictions, labels = eval_pred
+        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-    eval_samples = int(data_args.eval_ratio * len(dataset))
-    eval_dataset = dataset.select(range(train_samples, train_samples + eval_samples))
+        rouge_results = rouge.compute(predictions=decoded_preds, references=decoded_labels)
+        bleu_results = bleu.compute(predictions=decoded_preds, references=decoded_labels)
 
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)
+        cider_scorer = Cider()
+        cands = {idx: [pred] for idx, pred in enumerate(decoded_preds)}
+        refs = {idx: [label] for idx, label in enumerate(decoded_labels)}
+        cider_score, _ = cider_scorer.compute_score(refs, cands)
 
-    metric = load_metric("accuracy")
+        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in predictions]
+        gen_len = np.mean(prediction_lens)
 
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
-        # preds have the same shape as the labels, after the argmax(-1) has been calculated
-        # by preprocess_logits_for_metrics
-        labels = labels.reshape(-1)
-        preds = preds.reshape(-1)
-        mask = labels != -100
-        labels = labels[mask]
-        preds = preds[mask]
-        return metric.compute(predictions=preds, references=labels)
+        return {'bleu': bleu_results['bleu'], 'rouge': rouge_results['rougeL'], 'cider': cider_score, 'gen_len': gen_len}
 
     # Data collator
-    # This one will take care of randomly masking the tokens.
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm_probability=data_args.mlm_probability,
-        pad_to_multiple_of=config.max_seq_length,
-    )
+    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model_args.model_name_or_path)
 
     # Initialize our Trainer
-    trainer = Trainer(
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
+        train_dataset=dataset["train"] if training_args.do_train else None,
+        eval_dataset=dataset["val"] if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        compute_metrics=compute_metrics1,
     )
-
-    # Initial evaluation
-    logger.info("*** Initial Evaluate ***")
-    metrics = trainer.evaluate()
-    trainer.log_metrics("eval", metrics)
-    trainer.save_metrics("eval", metrics)
 
     # Training
     if training_args.do_train:
@@ -345,13 +306,16 @@ def main():
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
 
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
+
+    # Prediction
+    if training_args.do_predict:
+        logger.info("*** Predict ***")
+        predictions, labels, metrics = trainer.predict(dataset["test"], metric_key_prefix="predict")
+
+        trainer.log_metrics("predict", metrics)
+        trainer.save_metrics("predict", metrics)
 
     # Wandb logging
     combined_args = {**vars(data_args), **vars(model_args)}
@@ -363,15 +327,6 @@ def main():
     wandb.config.update({"trainable_params": trainable_params})
     wandb.run.summary["Total Parameters"] = total_params
     wandb.run.summary["Trainable Parameters"] = trainable_params
-
-    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "fill-mask"}
-    if data_args.dataset is not None:
-        kwargs["dataset_tags"] = data_args.dataset
-        if data_args.dataset_domain is not None:
-            kwargs["dataset_args"] = data_args.dataset_domain
-            kwargs["dataset"] = f"{data_args.dataset} {data_args.dataset_domain}"
-        else:
-            kwargs["dataset"] = data_args.dataset
 
 
 if __name__ == "__main__":

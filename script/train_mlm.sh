@@ -13,14 +13,14 @@ ulimit -c unlimited
 module load cuda-11.1.1
 
 export WANDB_PROJECT='MMHG'
-export WANDB_WATCH='all'
+export WANDB_WATCH='gradients'
 export PYTHONPATH=.
 
 POSITION_TYPE='metapath'
-LORA_TYPE='self_attention'
+LORA_TYPE='self_cross_attention'
 RANDOM_INIT='True'
-LAYOUT='l1'
-DESCRIPTION=lora-${LORA_TYPE}-no-out-fft
+LAYOUT='s1'
+DESCRIPTION=lora-${LORA_TYPE}-no-out
 
 python3 language_modelling/convert_bert_to_tdo.py \
     --layout ${LAYOUT} \

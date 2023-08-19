@@ -13,14 +13,15 @@ ulimit -c unlimited
 module load cuda-11.1.1
 
 export WANDB_PROJECT='MMHG'
+export WANDB_WATCH='gradients'
 export PYTHONPATH=.
 
-POSITION_TYPE='indiv'
-LORA_TYPE='none'
+POSITION_TYPE='metapath'
+LORA_TYPE='cross_attention'
 MODEL_NAME='text-decoder-only'
-LAYOUT='l1'
+LAYOUT='s1'
 POOLING_METHOD='cls'
-DESCRIPTION=position-${POSITION_TYPE}
+DESCRIPTION=lora-${LORA_TYPE}-s1
 
 python language_modelling/run_node_classification.py \
     --model_name_or_path model/PLMs/${MODEL_NAME}-${LAYOUT}-mlm-${DESCRIPTION} \
