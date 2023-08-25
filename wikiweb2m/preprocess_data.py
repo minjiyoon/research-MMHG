@@ -69,6 +69,50 @@ class DataParser():
         parsed_dataset = raw_dataset.map(_parse_function)
         self.dataset = parsed_dataset
 
+    def save_list(self):
+        #page_list = defaultdict(list)
+        section_list = defaultdict(list)
+        #image_list = defaultdict(list)
+        for page_id, d in enumerate(self.dataset):
+            if page_id % 100000 == 0:
+                print(page_id, 'have processed...')
+            split = d[0]['split'].numpy().decode()
+            # page description task
+            #is_sample = d[0]['is_page_description_sample'].numpy()
+            #if is_sample == 1:
+            #    page_list[split].append(d)
+            # section summarization task
+            are_samples = tf.sparse.to_dense(d[1]['is_section_summarization_sample']).numpy()
+            for section_id in range(are_samples.shape[0]):
+                is_sample = are_samples[section_id][0]
+                if is_sample == 1:
+                    section_list[split].append((section_id, d))
+            # image summarization task
+            #are_samples = tf.sparse.to_dense(d[1]['is_image_caption_sample']).numpy()
+            #for section_id in range(are_samples.shape[0]):
+            #    for image_id in range(are_samples[section_id].shape[0]):
+            #        is_sample = are_samples[section_id][image_id]
+            #        if is_sample == 1:
+            #            image_list[split].append((section_id, image_id, d))
+
+        #print(f'task: page, train_num: ', len(page_list['train']), ', val_num: ', len(page_list['val']), ', test_num: ', len(page_list['test']))
+        print(f'task: section, train_num: ', len(section_list['train']), ', val_num: ', len(section_list['val']), ', test_num: ', len(section_list['test']))
+        #print(f'task: image, train_num: ', len(image_list['train']), ', val_num: ', len(image_list['val']), ', test_num: ', len(image_list['test']))
+
+        for split in ('train', 'val', 'test'):
+            #with open(f'{self.path}/wikiweb2m_page_{split}.pkl', 'wb') as file:
+            #    pickle.dump(page_list[split], file)
+            #with open(f'{self.path}/wikiweb2m_section_{split}_small.pkl', 'wb') as file:
+            #    pickle.dump(section_list[split][:10000], file)
+            #with open(f'{self.path}/wikiweb2m_section_{split}_medium.pkl', 'wb') as file:
+            #    pickle.dump(section_list[split][:100000], file)
+            with open(f'{self.path}/wikiweb2m_section_{split}_large.pkl', 'wb') as file:
+                pickle.dump(section_list[split][:1000000], file)
+            break
+            #with open(f'{self.path}/wikiweb2m_image_{split}.pkl', 'wb') as file:
+            #    pickle.dump(image_list[split], file)
+
+
     def split_preprocess(self):
         page_list = defaultdict(list)
         section_list = defaultdict(list)
@@ -76,6 +120,8 @@ class DataParser():
         for page_id, d in enumerate(self.dataset):
             if page_id % 100000 == 0:
                 print(page_id, 'have processed...')
+            if page_id == 100000:
+                break
 
             # page information
             data = {}
@@ -127,11 +173,11 @@ class DataParser():
 
         for split in ('train', 'val', 'test'):
             df = pd.DataFrame(page_list[split])
-            df.to_parquet(f'{self.path}/page_{split}.parquet')
+            df.to_parquet(f'{self.path}/page_{split}_small.parquet')
             df = pd.DataFrame(section_list[split])
-            df.to_parquet(f'{self.path}/section_{split}.parquet')
+            df.to_parquet(f'{self.path}/section_{split}_small.parquet')
             df = pd.DataFrame(image_list[split])
-            df.to_parquet(f'{self.path}/image_{split}.parquet')
+            df.to_parquet(f'{self.path}/image_{split}_small.parquet')
 
     def split_ids(self, task):
         id_list = defaultdict(list)
@@ -159,35 +205,6 @@ class DataParser():
         with open(f'{self.path}/{task}_id_split.pkl', 'wb') as file:
             pickle.dump(id_list, file)
 
-    def split(self, task):
-        data_list = defaultdict(list)
-        for page_id, d in enumerate(self.dataset):
-            import ipdb; ipdb.set_trace()
-            if page_id % 100000 == 0:
-                print(page_id, 'have processed...')
-            split = d[0]['split'].numpy().decode()
-            data = {}
-            if task == 'page_description':
-                is_sample = d[0]['is_page_description_sample'].numpy()
-                if is_sample != 1:
-                    continue
-            else:
-                if task == 'section_summarization':
-                    are_samples = d[1]['is_section_summarization_sample'].values.numpy()
-                else:
-                    are_samples = d[1]['is_image_caption_sample'].values.numpy()
-                for section_id in range(are_samples.shape[0]):
-                    is_sample = are_samples[section_id]
-                    if is_sample != 1:
-                        continue
-                    data['section_clean_1st_sentence'] = d[1]['section_clean_1st_sentence'].values.numpy()[section_id].decode()
-                    data['section_rest_sentence'] = d[1]['section_rest_sentence'].values.numpy()[section_id].decode()
-                    data_list[split].append(data)
-
-        print(f'task: {task}, train_num: ', len(data_list['train']), ', val_num: ', len(data_list['val']), ', test_num: ', len(data_list['test']))
-        for split in ('train', 'val', 'test'):
-            df = pd.DataFrame(data_list[split])
-            df.to_parquet(f'{self.path}/{task}_{split}.parquet')
 
     def convert_to_numpy(self):
         numpy_list = []
@@ -237,8 +254,6 @@ class DataParser():
 
 if __name__ == "__main__":
     parser = DataParser()
-    #parser.split('section_summarization')
-    #parser.split('page_description')
-    #parser.split('image_caption')
     #parser.convert_to_numpy()
-    parser.split_preprocess()
+    #parser.split_preprocess()
+    parser.save_list()

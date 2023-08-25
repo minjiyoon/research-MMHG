@@ -17,19 +17,24 @@
 """ Finetuning summary generation models"""
 import wandb
 import logging
-import math
 import os
-import random
 import sys
 from time import perf_counter
+from tqdm.auto import tqdm
 
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from scipy.special import expit
 
 import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
+mp.set_sharing_strategy('file_system')
+from torch.utils.data import DataLoader
+
 import datasets
 from datasets import load_dataset
 import transformers
@@ -37,24 +42,27 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
-    AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
     DataCollatorForSeq2Seq,
     HfArgumentParser,
-    Trainer,
-    Seq2SeqTrainer,
-    TrainingArguments,
     Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
     set_seed,
+    get_scheduler,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 import evaluate
+from wikiweb2m import load_wikiweb2m, WikiWeb2M
 from wikiweb2m.cider import Cider
 
 #from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
+
+import nltk
+try:
+    nltk.data.find("tokenizers/punkt")
+except (LookupError, OSError):
+    nltk.download("punkt", quiet=True)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
@@ -83,9 +91,6 @@ class DataTrainingArguments:
             "If False, will pad the samples dynamically when batching to the maximum length in the batch."
         },
     )
-    mlm_probability: float = field(
-        default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
-    )
 
     dataset: Optional[str] = field(
         default='wikiweb2m', metadata={"help": "The name of the dataset to use (via the datasets library)."}
@@ -95,6 +100,12 @@ class DataTrainingArguments:
     )
     context: Optional[str] = field(
         default='section_only', metadata={"help": "The domain of OAG datasets"}
+    )
+    max_input_length: Optional[int] = field(
+        default=512, metadata={"help": "maximum token length of input text"}
+    )
+    max_output_length: Optional[int] = field(
+        default=128, metadata={"help": "maximum token length of output text"}
     )
 
     sample_depth: Optional[int] = field(
@@ -109,6 +120,14 @@ class DataTrainingArguments:
     duplicate_encoding: Optional[bool] = field(
         default=False, metadata={"help": "how to encode computation graphs"}
     )
+
+    wandb_project: Optional[str] = field(
+        default='MMHG', metadata={"help": "wandb project name"}
+    )
+    wandb_run: Optional[str] = field(
+        default='default', metadata={"help": "wandb run name"}
+    )
+
 
 @dataclass
 class ModelArguments:
@@ -148,12 +167,12 @@ class ModelArguments:
 
 
 def main():
-    # See all possible arguments in src/transformers/training_args.py
+    # See all possible arguments in src/transformers/train_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args, data_args, train_args = parser.parse_args_into_dataclasses()
 
     if data_args.duplicate_encoding is False and data_args.position_type != "no_position":
         raise ValueError(
@@ -168,7 +187,7 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    log_level = training_args.get_process_log_level()
+    log_level = train_args.get_process_log_level()
     logger.setLevel(log_level)
     datasets.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.set_verbosity(log_level)
@@ -177,18 +196,18 @@ def main():
 
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+        f"Process rank: {train_args.local_rank}, device: {train_args.device}, n_gpu: {train_args.n_gpu}"
+        + f"distributed training: {bool(train_args.local_rank != -1)}, 16-bits training: {train_args.fp16}"
     )
-    logger.info(f"Training/evaluation parameters {training_args}")
+    logger.info(f"Training/evaluation parameters {train_args}")
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+    if os.path.isdir(train_args.output_dir) and train_args.do_train and not train_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(train_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(train_args.output_dir)) > 0:
             raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                f"Output directory ({train_args.output_dir}) already exists and is not empty. "
                 "Use --overwrite_output_dir to overcome."
             )
         elif last_checkpoint is not None:
@@ -198,20 +217,25 @@ def main():
             )
 
     # Set seed before initializing model.
-    set_seed(training_args.seed)
+    set_seed(train_args.seed)
+    # Wandb logging
+    wandb.init(project=data_args.wandb_project, name=data_args.wandb_run)
+    combined_args = {**vars(data_args), **vars(model_args), **vars(train_args)}
+    wandb.config.update(combined_args)
 
-    # Load pretrained model and tokenizer
+    # Prepare pretrained model
     if "t5" in model_args.model_name_or_path:
+        config = AutoConfig.from_pretrained(model_args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_args.model_name_or_path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_args.model_name_or_path, config=config)
     elif "opt" in model_args.model_name_or_path:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path)
     else:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         config = TDOConfig.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=model_args.cache_dir)
-
         model = TDOForMaskedLM.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
@@ -219,114 +243,200 @@ def main():
         if data_args.position_type != "no_position":
             model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
     tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
-
-    prefix = "summarize: "
-    def preprocess_function(examples):
-        inputs = [prefix + section_text for section_text in examples["section_rest_sentence"]]
-        model_inputs = tokenizer(inputs, padding='longest', max_length=1024, truncation=True, return_tensors="pt")
-
-        text_target = examples["section_clean_1st_sentence"]
-        labels = tokenizer(text_target, padding='longest', max_length=128, truncation=True, return_tensors="pt")
-
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
-
-    dataset = load_dataset("parquet", data_files={"train": f"./wikiweb2m/raw/{data_args.task}_train.parquet",
-                                                "val": f"./wikiweb2m/raw/{data_args.task}_val.parquet",
-                                                "test": f"./wikiweb2m/raw/{data_args.task}_test.parquet"})
-
-    with training_args.main_process_first(desc="dataset map pre-processing"):
-        dataset = dataset.map(
-            preprocess_function,
-            batched=True,
-            batch_size=1024,
-            writer_batch_size=1024,
-            load_from_cache_file=not data_args.overwrite_cache,
-            cache_file_names={"train": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_train",
-                                "val": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_val",
-                                "test": f"wikiweb2m/cache/{data_args.task}_{data_args.context}_test"},
-            desc="Preprocessing WikiWeb2M dataset",
-        )
-
-    rouge = evaluate.load("rouge")
-    bleu = evaluate.load("bleu")
-
-    def compute_metrics1(eval_pred):
-        predictions, labels = eval_pred
-        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-        rouge_results = rouge.compute(predictions=decoded_preds, references=decoded_labels)
-        bleu_results = bleu.compute(predictions=decoded_preds, references=decoded_labels)
-
-        cider_scorer = Cider()
-        cands = {idx: [pred] for idx, pred in enumerate(decoded_preds)}
-        refs = {idx: [label] for idx, label in enumerate(decoded_labels)}
-        cider_score, _ = cider_scorer.compute_score(refs, cands)
-
-        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in predictions]
-        gen_len = np.mean(prediction_lens)
-
-        return {'bleu': bleu_results['bleu'], 'rouge': rouge_results['rougeL'], 'cider': cider_score, 'gen_len': gen_len}
-
-    # Data collator
-    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model_args.model_name_or_path)
-
-    # Initialize our Trainer
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset["train"] if training_args.do_train else None,
-        eval_dataset=dataset["val"] if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics1,
-    )
-
-    # Training
-    if training_args.do_train:
-        checkpoint = None
-        if training_args.resume_from_checkpoint is not None:
-            checkpoint = training_args.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-        metrics = train_result.metrics
-
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
-
-    # Evaluation
-    if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate()
-
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
-
-    # Prediction
-    if training_args.do_predict:
-        logger.info("*** Predict ***")
-        predictions, labels, metrics = trainer.predict(dataset["test"], metric_key_prefix="predict")
-
-        trainer.log_metrics("predict", metrics)
-        trainer.save_metrics("predict", metrics)
-
     # Wandb logging
-    combined_args = {**vars(data_args), **vars(model_args)}
-    wandb.config.update(combined_args)
-
+    wandb.watch(model)
     total_params = sum(param.numel() for param in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     wandb.config.update({"total_params": total_params})
     wandb.config.update({"trainable_params": trainable_params})
-    wandb.run.summary["Total Parameters"] = total_params
-    wandb.run.summary["Trainable Parameters"] = trainable_params
+
+    if train_args.fp16:
+        model = model.float()
+    elif train_args.f16:
+        model = model.bfloat16()
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    model = torch.nn.DataParallel(model).to(device)
+
+    # Prepare Dataset
+    start_time = perf_counter()
+    train_data, val_data, test_data = load_wikiweb2m(data_args.task)
+    print(f'Loading wikiweb2m done: {perf_counter()-start_time}')
+    start_time = perf_counter()
+    train_dataset = WikiWeb2M(data_args, train_data, tokenizer)
+    val_dataset = WikiWeb2M(data_args, val_data, tokenizer)
+    test_dataset = WikiWeb2M(data_args, test_data, tokenizer)
+    print(f'Initialize datasets: {perf_counter()-start_time}')
+
+    ngpus = torch.cuda.device_count()
+    num_workers = train_args.dataloader_num_workers
+    train_batch_size = train_args.per_device_train_batch_size #* ngpus
+    val_batch_size = train_args.per_device_eval_batch_size #* ngpus
+
+    #start_time = perf_counter()
+    dataloader_params = {"num_workers": num_workers, "prefetch_factor": 10, "pin_memory": True, "shuffle": True, "drop_last": True}
+    train_dataloader = DataLoader(train_dataset, collate_fn=train_dataset.collate, batch_size=train_batch_size, **dataloader_params)
+    val_dataloader = DataLoader(val_dataset, collate_fn=val_dataset.collate, batch_size=val_batch_size, **dataloader_params)
+    test_dataloader = DataLoader(test_dataset, collate_fn=test_dataset.collate, batch_size=val_batch_size, **dataloader_params)
+    print(f'Initialize dataloaders: {perf_counter()-start_time}')
+
+
+    # Example Dataset
+    #raw_datasets = load_dataset("cnn_dailymail", "3.0.0")
+    #column_names = raw_datasets["train"].column_names
+    #text_column = "article"
+    #summary_column = "highlights"
+    #prefix = "summarize: "
+
+    #def preprocess_function(examples):
+    #    inputs = examples[text_column]
+    #    targets = examples[summary_column]
+    #    inputs = [prefix + inp for inp in inputs]
+    #    model_inputs = tokenizer(inputs, max_length=data_args.max_input_length, padding="max_length", truncation=True)
+    #    labels = tokenizer(text_target=targets, max_length=data_args.max_output_length, padding="max_length", truncation=True)
+
+    #    labels["input_ids"] = [
+    #        [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+    #    ]
+    #    model_inputs["labels"] = labels["input_ids"]
+    #    return model_inputs
+
+    #train_dataset = raw_datasets["train"].map(
+    #    preprocess_function,
+    #    batched=True,
+    #    num_proc=train_args.dataloader_num_workers,
+    #    remove_columns=column_names,
+    #    load_from_cache_file=True,
+    #    desc="Running tokenizer on dataset",
+    #)
+
+    #max_target_length = data_args.max_output_length
+    #eval_dataset = raw_datasets["validation"].map(
+    #    preprocess_function,
+    #    batched=True,
+    #    num_proc=train_args.dataloader_num_workers,
+    #    remove_columns=column_names,
+    #    load_from_cache_file=True,
+    #    desc="Running tokenizer on dataset",
+    #)
+
+    #label_pad_token_id = -100
+    #data_collator = DataCollatorForSeq2Seq(
+    #    tokenizer,
+    #    model=model,
+    #    label_pad_token_id=label_pad_token_id,
+    #    pad_to_multiple_of=8,
+    #)
+
+    #train_dataloader = DataLoader(
+    #    train_dataset, shuffle=True, collate_fn=data_collator, batch_size=train_args.per_device_train_batch_size
+    #)
+    #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=train_args.per_device_eval_batch_size)
+    train_args.max_steps = 3 * len(train_dataloader)
+    print("TRAIN DATA LENGTH: ", len(train_dataloader))
+    print("VAL DATA LENGTH:", len(val_dataloader))
+
+    # Evaluate loop
+    def evaluate_step(model, dataloader, prefix="eval"):
+        rouge = evaluate.load("rouge")
+        bleu = evaluate.load("bleu")
+        cider_scorer = Cider()
+
+        def postprocess_text(preds, labels):
+            preds = [pred.strip() for pred in preds]
+            labels = [label.strip() for label in labels]
+
+            # rougeLSum expects newline after each sentence
+            preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+            labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+            return preds, labels
+
+        all_generated_texts = []
+        all_labels = []
+        total_loss = 0.
+        step = 0
+        eval_step = 1000
+        progress_bar = tqdm(range(eval_step))
+        model.eval()
+        with torch.no_grad():
+            for batch in dataloader:
+                if step == eval_step:
+                    break
+                batch = {k: v.to(device) for k, v in batch.items()}
+                outputs = model(**batch)
+                loss = outputs.loss.sum()
+
+                logits = outputs.logits
+                predictions = torch.argmax(logits, dim=-1).cpu()
+                #predictions = model.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+                decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+
+                labels = batch["labels"].cpu()
+                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+                total_loss += loss.item()
+                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+                all_generated_texts.extend(decoded_preds)
+                all_labels.extend(decoded_labels)
+                progress_bar.update(1)
+                step += 1
+
+        cands = {idx: [pred] for idx, pred in enumerate(all_generated_texts)}
+        refs = {idx: [label] for idx, label in enumerate(all_labels)}
+        cider_score, _ = cider_scorer.compute_score(refs, cands)
+        rouge_results = rouge.compute(predictions=all_generated_texts, references=all_labels)
+        bleu_results = bleu.compute(predictions=all_generated_texts, references=all_labels)
+
+        results = {
+                f'{prefix}_loss': total_loss / step / val_batch_size,
+                f'{prefix}_bleu': bleu_results['bleu'],
+                f'{prefix}_rouge': rouge_results['rougeL'],
+                f'{prefix}_cider': cider_score,
+            }
+        wandb.log(results)
+        print(results)
+
+    # Prepare training
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer_cls = torch.optim.AdamW
+    optimizer = optimizer_cls(model.parameters(), train_args.learning_rate,
+            betas=(train_args.adam_beta1, train_args.adam_beta2),
+            weight_decay=train_args.weight_decay, eps=1e-8)
+
+    num_warmup_steps = int(train_args.warmup_ratio * train_args.max_steps)
+    lr_scheduler = get_scheduler(name="linear", optimizer=optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=train_args.max_steps)
+
+    # Training loop
+    step = 0
+    progress_bar = tqdm(range(train_args.max_steps))
+    model.train()
+    while step < train_args.max_steps:
+        for batch in train_dataloader:
+            if step == train_args.max_steps:
+                break
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            loss = outputs.loss.mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            lr_scheduler.step()
+
+            progress_bar.update(1)
+            step += 1
+
+            if step % train_args.logging_steps == 0:
+                wandb.log({"train_loss_batch": loss.item()})
+                print(f"[{step} steps] training loss: {loss}")
+            if step % train_args.eval_steps == 0:
+                evaluate_step(model, train_dataloader, prefix="train")
+                evaluate_step(model, val_dataloader, prefix="eval")
+
+    #evaluate_step(model, test_dataloader, prefix="test")
 
 
 if __name__ == "__main__":
