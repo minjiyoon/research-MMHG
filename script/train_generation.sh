@@ -46,6 +46,7 @@ python language_modelling/run_generation.py \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 4 \
     --dataloader_num_workers 4 \
+    --gradient_accumulation_steps 1 \
     --fp16 \
     --wandb_project MMHG \
     --wandb_run ${DESCRIPTION}

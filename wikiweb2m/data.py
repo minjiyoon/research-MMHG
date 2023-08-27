@@ -1,9 +1,13 @@
 import torch
 import tensorflow as tf
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+
 from transformers import AutoTokenizer
 import pickle
 from PIL import Image
 from urllib.request import urlopen
+
+from language_modelling import utils
 
 def load_wikiweb2m(task):
     with tf.device('/cpu:0'):
@@ -14,12 +18,11 @@ def load_wikiweb2m(task):
         with open(f'./wikiweb2m/raw/wikiweb2m_{task}_test_medium.pkl', 'rb') as f:
             test_dataset = pickle.load(f)
 
-    return train_dataset, val_dataset, test_dataset
-
+    return train_dataset, val_dataset[:10000], test_dataset[:10000]
 
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, data_list, tokenizer):
+    def __init__(self, args, data_list, tokenizer, feature_extractor_model=None):
         self.path = './wikiweb2m/raw/'
         self.task = args.task
         self.context = args.context
@@ -28,6 +31,9 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
+
+        if feature_extractor_model is not None and self.context == 'all':
+            self.feature_extractor = utils.get_feature_extractor_for_model(feature_extractor_model)
 
     def __len__(self):
         return len(self.data_list)
@@ -64,7 +70,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 continue
             image_url = image_urls[section_id][image_id].numpy().decode()
             image_caption = tf.sparse.to_dense(d[1]['section_image_captions'])[section_id][image_id].numpy().decode()
-            section_image_info.append((Image.open(urlopen(image_url)), image_caption))
+
+            img = Image.open(urlopen(image_url))
+            image = utils.get_pixel_values_for_model(self.feature_extractor, img)
+            section_image_info.append((image, image_caption))
         return section_image_info
 
     def get_image_info(self, section_id, image_id, d, remove_caption=True):
@@ -110,13 +119,21 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         inputs, labels = inputs.replace('\n', ''), labels.replace('\n', '')
         inputs, labels = ' '.join(inputs.split()), ' '.join(labels.split())
-        return {"inputs": inputs, "labels": labels}
-        # Tokenize
-        #model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        #labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
-        #labels_with_ignore_index = torch.LongTensor([label if label != 0 else -100 for label in labels[0]])
 
-        #return {"input_ids": model_inputs.input_ids[0], "attention_mask": model_inputs.attention_mask[0], "labels": labels_with_ignore_index}
+        # Tokenize
+        model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+        labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
+        labels_with_ignore_index = [label if label != 0 else -100 for label in labels[0]]
+
+        input_ids = model_inputs.input_ids[0]
+        attention_mask = model_inputs.attention_mask[0]
+        labels = torch.LongTensor(labels_with_ignore_index)
+
+        return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels
+                }
 
     @torch.no_grad()
     def collate(self, items):
@@ -133,5 +150,4 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 "attention_mask": torch.LongTensor(model_inputs.attention_mask),
                 "labels": torch.LongTensor(labels_with_ignore_index)
                 }
-
 
