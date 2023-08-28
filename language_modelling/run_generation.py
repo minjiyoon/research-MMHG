@@ -26,6 +26,7 @@ from tqdm.auto import tqdm
 from typing import Optional
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Only display errors
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import numpy as np
 
@@ -163,6 +164,10 @@ class TrainingArguments:
     save_epoch: optional[int] = field(
         default=10, metadata={"help": "Starting epoch."}
     )
+    print_freq: optional[int] = field(
+        default=10, metadata={"help": "print frequency (default: 10)"}
+    )
+
 
     learning_rate: optional[float] = field(
         default=0.0001, metadata={"help": "initial learning rate."}
@@ -179,7 +184,9 @@ class TrainingArguments:
     grad_accumulation_steps: optional[int] = field(
         default=4, metadata={"help": "number of gradient accumulation steps."}
     )
-
+    grad_clip: optional[float] = field(
+        default=1.0, metadata={"help": "gradient clipping amount."}
+    )
     lr_warmup_steps: optional[int] = field(
         default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
@@ -463,6 +470,8 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
         forward_start = time.time()
         outputs = model(**batch)
+        forward_time.update(time.time() - forward_start)
+
         loss = outputs.loss
         loss = loss / train_args.grad_accumulation_steps
         losses.update(loss.item(), batch["input_ids"].size(0))
@@ -470,23 +479,45 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
         # Update weights
         if ((i + 1) % train_args.grad_accumulation_steps == 0) or (i == train_args.steps_per_epoch - 1):
-
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if train_args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), train_args.grad_clip)
             optimizer.step()
             optimizer.zero_grad()
-            lr_scheduler.step()
+            print('=' * 80)
 
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+        if actual_step == 1 or (i + 1) % train_args.print_freq == 0:
+            losses.all_reduce()
+            batch_time.all_reduce()
+            data_time.all_reduce()
+            forward_time.all_reduce()
+            ex_per_sec = (train_args.per_device_train_batch_size / batch_time.avg) * ngpus_per_node
 
-        if step % train_args.logging_steps == 0:
-            #wandb.log({"train_loss_batch": loss.item()})
-            print(f"[{step} steps] training loss: {loss}")
-        #if step % train_args.eval_steps == 0:
-        #    evaluate_step(model, train_dataloader, prefix="train")
-        #    evaluate_step(model, val_dataloader, prefix="eval")
+            progress.display(i + 1)
 
-    #evaluate_step(model, test_dataloader, prefix="test")
+            if gpu % world_size == 0:
+                wandb.log({"train/loss": losses.avg}, step=actual_step)
+                wandb.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
+                wandb.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
+                wandb.log({"metrics/total_secs_captioning": forward_time.avg}, step=actual_step)
+                wandb.log({"metrics/examples_per_sec": ex_per_sec}, step=actual_step)
 
-    dist.destroy_process_group()
+            losses.reset()
+            batch_time.reset()
+            data_time.reset()
+            forward_time.reset()
+
+        if i == train_args.steps_per_epoch - 1:
+            break
+
+        lr_scheduler.step()
+        curr_lr = scheduler.get_last_lr()
+        if actual_step == 1 or (i + 1) % train_args.print_freq == 0:
+            if gpu % world_size == 0:
+                wandb.log({"train/lr": curr_lr[0]}, step=actual_step)
+
 
 # Evaluate loop
 def evaluate_loop(model, dataloader, prefix="eval"):
