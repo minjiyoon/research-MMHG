@@ -1,33 +1,39 @@
 import torch
-import tensorflow as tf
-tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-
 from transformers import AutoTokenizer
 import pickle
+import pandas as pd
 from PIL import Image
 from urllib.request import urlopen
 
 from language_modelling import utils
 
-def load_wikiweb2m(task):
-    with tf.device('/cpu:0'):
-        with open(f'./wikiweb2m/raw/wikiweb2m_{task}_train_medium.pkl', 'rb') as f:
-            train_dataset = pickle.load(f)
-        with open(f'./wikiweb2m/raw/wikiweb2m_{task}_val_medium.pkl', 'rb') as f:
-            val_dataset = pickle.load(f)
-        with open(f'./wikiweb2m/raw/wikiweb2m_{task}_test_medium.pkl', 'rb') as f:
-            test_dataset = pickle.load(f)
+def load_wikiweb2m_tf(task):
+    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_train_medium.pkl', 'rb') as f:
+        train_dataset = pickle.load(f)
+    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_val_medium.pkl', 'rb') as f:
+        val_dataset = pickle.load(f)
+    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_test_medium.pkl', 'rb') as f:
+        test_dataset = pickle.load(f)
 
     return train_dataset, val_dataset[:10000], test_dataset[:10000]
 
+def load_wikiweb2m(task):
+    train_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_train.parquet')
+    val_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_val.parquet')
+    test_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_test.parquet')
+
+    return train_df, val_df, test_df
+
+
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, data_list, tokenizer, feature_extractor_model=None):
+    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None):
         self.path = './wikiweb2m/raw/'
         self.task = args.task
         self.context = args.context
 
-        self.data_list = data_list
+        self.df = df
+        self.id_list = id_list
         self.tokenizer = tokenizer
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
@@ -36,7 +42,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
             self.feature_extractor = utils.get_feature_extractor_for_model(feature_extractor_model)
 
     def __len__(self):
-        return len(self.data_list)
+        return len(self.id_list)
 
     def get_page_info(self, d):
         page_url = d[0]['page_url'].numpy().decode()
@@ -85,37 +91,37 @@ class WikiWeb2M(torch.utils.data.Dataset):
             return Image.open(urlopen(image_url)), image_caption
 
     def __getitem__(self, index):
-        with tf.device('/cpu:0'):
-            if self.task == "section":
-                section_id, d = self.data_list[index]
-                if self.context == "section_only":
-                    section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                    inputs = "summarize: " + section_info
-                elif self.context == "text_only":
-                    page_info = self.get_page_info(d)
-                    section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                    context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
-                    context_info = []
-                    for context_id in range(context_num):
-                        if context_id == section_id:
-                            continue
-                        context_info.append(self.get_section_info(context_id, d, remove_summary=False))
-                    context_info = ', '.join(context_info)
-                    inputs = "summarize: " + section_info + ", context: " + page_info + context_info
-                elif self.context == "all":
-                    page_info = self.get_page_info(d)
-                    section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                    section_image_info = self.get_section_images(section_id, d)
-                    context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
-                    context_info = []
-                    for context_id in range(context_num):
-                        if context_id == section_id:
-                            continue
-                        context_text = self.get_section_info(context_id, d, remove_summary=False)
-                        context_image = self.get_section_images(context_id, d)
-                        context_info.append((context_text, context_info))
-                    context_info = ', '.join(context_info)
-                    inputs = "summarize: " + section_info + ", context: " + page_info + context_info
+        if self.task == "section":
+            page_id, section_id = self.id_list[index]
+            section_id, d = self.data_list[index]
+            if self.context == "section_only":
+                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+                inputs = "summarize: " + section_info
+            elif self.context == "text_only":
+                page_info = self.get_page_info(d)
+                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+                context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
+                context_info = []
+                for context_id in range(context_num):
+                    if context_id == section_id:
+                        continue
+                    context_info.append(self.get_section_info(context_id, d, remove_summary=False))
+                context_info = ', '.join(context_info)
+                inputs = "summarize: " + section_info + ", context: " + page_info + context_info
+            elif self.context == "all":
+                page_info = self.get_page_info(d)
+                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+                section_image_info = self.get_section_images(section_id, d)
+                context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
+                context_info = []
+                for context_id in range(context_num):
+                    if context_id == section_id:
+                        continue
+                    context_text = self.get_section_info(context_id, d, remove_summary=False)
+                    context_image = self.get_section_images(context_id, d)
+                    context_info.append((context_text, context_info))
+                context_info = ', '.join(context_info)
+                inputs = "summarize: " + section_info + ", context: " + page_info + context_info
 
         inputs, labels = inputs.replace('\n', ''), labels.replace('\n', '')
         inputs, labels = ' '.join(inputs.split()), ' '.join(labels.split())

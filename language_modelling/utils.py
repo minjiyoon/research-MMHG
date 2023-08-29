@@ -1,7 +1,15 @@
+from enum import Enum
 from transformers import AutoFeatureExtractor
 from PIL import Image
 import shutil
 import torch
+
+import nltk
+try:
+    nltk.data.find("tokenizers/punkt")
+except (LookupError, OSError):
+    nltk.download("punkt", quiet=True)
+
 
 def get_feature_extractor_for_model(model_name: str):
     print(f'Using HuggingFace AutoFeatureExtractor for {model_name}.')
@@ -13,11 +21,13 @@ def get_pixel_values_for_model(feature_extractor, img: Image.Image):
     pixel_values = feature_extractor(img.convert('RGB'), return_tensors="pt").pixel_values[0, ...]  # (3, H, W)
     return pixel_values
 
+
 def get_params_count(model, max_name_len: int = 60):
     params = [(name[:max_name_len], p.numel(), str(tuple(p.shape)), p.requires_grad) for name, p in model.named_parameters()]
     total_trainable_params = sum([x[1] for x in params if x[-1]])
     total_nontrainable_params = sum([x[1] for x in params if not x[-1]])
     return params, total_trainable_params, total_nontrainable_params
+
 
 def get_params_count_str(model, max_name_len: int = 60):
     padding = 70  # Hardcoded depending on desired amount of padding and separators.
@@ -34,10 +44,22 @@ def get_params_count_str(model, max_name_len: int = 60):
     param_counts_text += '=' * (max_name_len + padding) + '\n'
     return param_counts_text
 
+
 def save_checkpoint(state, is_best, filename='checkpoint'):
     torch.save(state, filename + '.pth.tar')
     if is_best:
         shutil.copyfile(filename + '.pth.tar', filename + '_best.pth.tar')
+
+
+def postprocess_text(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [label.strip() for label in labels]
+
+    # rougeLSum expects newline after each sentence
+    preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+    return preds, labels
 
 
 class Summary(Enum):

@@ -12,6 +12,28 @@ import tensorflow.compat.v1 as tf
 from collections import defaultdict
 
 
+def convert_tf_to_scipy(tf_sparse_tensor):
+    array = tf.sparse.to_dense(tf_sparse_tensor).numpy()
+    if len(array.shape) == 2:
+        array = array.reshape(-1)
+    return array.tolist()
+
+def convert_to_scipy(page_id, d):
+    page_url = d[0]['page_url'].numpy()
+    page_title = d[0]['page_title'].numpy()
+    page_description = d[0]['clean_page_description'].numpy()
+    section_title = convert_tf_to_scipy(d[1]['section_title'])
+    section_depth = convert_tf_to_scipy(d[1]['section_depth'])
+    section_heading = convert_tf_to_scipy(d[1]['section_heading_level'])
+    section_parent_index = convert_tf_to_scipy(d[1]['section_parent_index'])
+    section_summary = convert_tf_to_scipy(d[1]['section_clean_1st_sentence'])
+    section_rest_sentence = convert_tf_to_scipy(d[1]['section_rest_sentence'])
+    image_url =  convert_tf_to_scipy(d[1]['section_image_url'])
+    image_caption = convert_tf_to_scipy(d[1]['section_image_captions'])
+
+    return [page_id, page_url, page_title, page_description, section_title, section_depth, section_heading, \
+                section_parent_index, section_summary, section_rest_sentence, image_url, image_caption]
+
 class DataParser():
     def __init__(self):
         self.path = './wikiweb2m/raw/'
@@ -66,8 +88,35 @@ class DataParser():
 
         data_path = glob.glob(self.path + self.filepath + self.suffix)
         raw_dataset = tf.data.TFRecordDataset(data_path, compression_type='GZIP')
-        parsed_dataset = raw_dataset.map(_parse_function)
-        self.dataset = parsed_dataset
+        self.dataset = raw_dataset.map(_parse_function)
+
+    def save_df_torch(self):
+        columns = ['page_id', 'page_url', 'page_title', 'page_description', 'section_title', 'section_depth', 'section_heading', \
+                'section_parent_index', 'section_summary', 'section_rest_sentence', 'image_url', 'image_caption']
+
+        train_df = pd.DataFrame(columns=columns)
+        val_df = pd.DataFrame(columns=columns)
+        test_df = pd.DataFrame(columns=columns)
+
+        for page_id, d in enumerate(self.dataset):
+            if page_id % 10000 == 0:
+                print(page_id, 'have processed...')
+            if page_id == 60000:
+                break
+            split = d[0]['split'].numpy().decode()
+            #if split == "train":
+            if page_id < 40000:
+                train_df.loc[len(train_df)] = convert_to_scipy(page_id, d)
+            #elif split == "val":
+            elif page_id < 50000:
+                val_df.loc[len(val_df)] = convert_to_scipy(page_id, d)
+            else:
+                test_df.loc[len(test_df)] = convert_to_scipy(page_id, d)
+
+        print(f'train_num: ', len(train_df), ', val_num: ', len(val_df), ', test_num: ', len(test_df))
+        train_df.to_parquet(f'{self.path}/wikiweb2m_train.parquet')
+        val_df.to_parquet(f'{self.path}/wikiweb2m_val.parquet')
+        test_df.to_parquet(f'{self.path}/wikiweb2m_test.parquet')
 
     def save_list(self):
         #page_list = defaultdict(list)
@@ -102,13 +151,12 @@ class DataParser():
         for split in ('train', 'val', 'test'):
             #with open(f'{self.path}/wikiweb2m_page_{split}.pkl', 'wb') as file:
             #    pickle.dump(page_list[split], file)
-            #with open(f'{self.path}/wikiweb2m_section_{split}_small.pkl', 'wb') as file:
-            #    pickle.dump(section_list[split][:10000], file)
+            with open(f'{self.path}/wikiweb2m_section_{split}_small.pkl', 'wb') as file:
+                pickle.dump(section_list[split][:10000], file)
             #with open(f'{self.path}/wikiweb2m_section_{split}_medium.pkl', 'wb') as file:
             #    pickle.dump(section_list[split][:100000], file)
-            with open(f'{self.path}/wikiweb2m_section_{split}_large.pkl', 'wb') as file:
-                pickle.dump(section_list[split][:1000000], file)
-            break
+            #with open(f'{self.path}/wikiweb2m_section_{split}_large.pkl', 'wb') as file:
+            #    pickle.dump(section_list[split][:1000000], file)
             #with open(f'{self.path}/wikiweb2m_image_{split}.pkl', 'wb') as file:
             #    pickle.dump(image_list[split], file)
 
@@ -182,22 +230,27 @@ class DataParser():
     def split_ids(self, task):
         id_list = defaultdict(list)
         for page_id, d in enumerate(self.dataset):
-            if page_id % 100000 == 0:
+            if page_id % 10000 == 0:
                 print(page_id, 'have processed...')
-            split = d[0]['split'].numpy().decode()
-            if task == 'page_description':
+            if page_id == 60000:
+                break
+            if page_id < 40000:
+                split = "train"
+            elif page_id < 50000:
+                split = "val"
+            else:
+                split = "test"
+            #split = d[0]['split'].numpy().decode()
+            if task == 'page':
                 is_sample = d[0]['is_page_description_sample'].numpy()
-                if is_sample != 1:
+                if is_sample == 0:
                     continue
                 id_list[split].append(page_id)
-            else:
-                if task == 'section_summarization':
-                    are_samples = d[1]['is_section_summarization_sample'].values.numpy()
-                else:
-                    are_samples = d[1]['is_image_caption_sample'].values.numpy()
+            elif task == 'section':
+                are_samples = d[1]['is_section_summarization_sample'].values.numpy()
                 for section_id in range(are_samples.shape[0]):
                     is_sample = are_samples[section_id]
-                    if is_sample != 1:
+                    if is_sample == 0:
                         continue
                     id_list[split].append((page_id, section_id))
 
@@ -256,4 +309,5 @@ if __name__ == "__main__":
     parser = DataParser()
     #parser.convert_to_numpy()
     #parser.split_preprocess()
-    parser.save_list()
+    #parser.split_ids('section')
+    parser.save_df_torch()

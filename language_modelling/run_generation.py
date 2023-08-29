@@ -22,7 +22,7 @@ import warnings
 from dataclasses import dataclass, field
 import time
 from time import perf_counter
-from tqdm.auto import tqdm
+import tqdm
 from typing import Optional
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Only display errors
@@ -39,6 +39,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 mp.set_sharing_strategy('file_system')
 from torch.optim.lr_scheduler import StepLR
+from torchmetrics import BLEUScore
 from warmup_scheduler import GradualWarmupScheduler
 
 from datasets import load_dataset
@@ -60,12 +61,6 @@ from wikiweb2m.cider import Cider
 
 from language_modelling import utils
 #from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
-
-import nltk
-try:
-    nltk.data.find("tokenizers/punkt")
-except (LookupError, OSError):
-    nltk.download("punkt", quiet=True)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
@@ -104,7 +99,7 @@ class DataArguments:
     sample_depth: Optional[int] = field(
         default=1, metadata={"help": "neighborhood hops for the computation graph sampling."}
     )
-    sample_num: optional[int] = field(
+    sample_num: Optional[int] = field(
         default=5, metadata={"help": "number of neighbors to sample per node."}
     )
     position_type: Optional[str] = field(
@@ -128,7 +123,7 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments:
-    seed: optional[int] = field(
+    seed: Optional[int] = field(
         default=None, metadata={"help": "seed for initializing training."}
     )
     fp16: Optional[bool] = field(
@@ -142,61 +137,64 @@ class TrainingArguments:
         default=False, metadata={"help": "evaluate model on validation set."}
     )
 
-    per_device_train_batch_size: optional[int] = field(
+    per_device_train_batch_size: Optional[int] = field(
         default=4, metadata={"help": "Batch size per device during training."}
     )
-    per_device_val_batch_size: optional[int] = field(
+    per_device_val_batch_size: Optional[int] = field(
         default=4, metadata={"help": "Batch size per device during evaluation/test."}
     )
-    dataloader_num_workers: optional[int] = field(
+    dataloader_num_workers: Optional[int] = field(
         default=4, metadata={"help": "Number of threads to read data."}
     )
 
-    start_epoch: optional[int] = field(
+    start_epoch: Optional[int] = field(
         default=0, metadata={"help": "Starting epoch."}
     )
-    epochs: optional[int] = field(
+    epochs: Optional[int] = field(
         default=90, metadata={"help": "Total number of epochs."}
     )
-    steps_per_epoch: optional[int] = field(
+    steps_per_epoch: Optional[int] = field(
         default=2000, metadata={"help": "Number of training steps per epoch."}
     )
-    save_epoch: optional[int] = field(
+    val_steps_per_epoch: Optional[int] = field(
+        default=1000, metadata={"help": "Number of training steps per epoch."}
+    )
+    save_epoch: Optional[int] = field(
         default=10, metadata={"help": "Starting epoch."}
     )
-    print_freq: optional[int] = field(
+    print_freq: Optional[int] = field(
         default=10, metadata={"help": "print frequency (default: 10)"}
     )
 
 
-    learning_rate: optional[float] = field(
+    learning_rate: Optional[float] = field(
         default=0.0001, metadata={"help": "initial learning rate."}
     )
-    adam_beta1: optional[float] = field(
+    adam_beta1: Optional[float] = field(
         default=0.9, metadata={"help": "beta1 for Adam."}
     )
-    adam_beta2: optional[float] = field(
+    adam_beta2: Optional[float] = field(
         default=0.95, metadata={"help": "beta2 for AdamDecay."}
     )
-    weight_decay: optional[float] = field(
+    weight_decay: Optional[float] = field(
         default=0.01, metadata={"help": "Weight decay parameter."}
     )
-    grad_accumulation_steps: optional[int] = field(
+    grad_accumulation_steps: Optional[int] = field(
         default=4, metadata={"help": "number of gradient accumulation steps."}
     )
-    grad_clip: optional[float] = field(
+    grad_clip: Optional[float] = field(
         default=1.0, metadata={"help": "gradient clipping amount."}
     )
-    lr_warmup_steps: optional[int] = field(
+    lr_warmup_steps: Optional[int] = field(
         default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
-    lr_schedule_step_size: optional[int] = field(
+    lr_schedule_step_size: Optional[int] = field(
         default=5, metadata={"help": "Number of steps before decaying lr."}
     )
-    lr_schedule_gamma: optional[float] = field(
+    lr_schedule_gamma: Optional[float] = field(
         default=0.1, metadata={"help": "Decay parameter for learning rate scheduler."}
     )
-    lr_warmup_steps: optional[int] = field(
+    lr_warmup_steps: Optional[int] = field(
         default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
 
@@ -229,19 +227,20 @@ def main():
                 + f"position_type: {data_args.position_type} cannot be set together"
             )
 
-    log_dir = os.path.join(data_args.log_dir, data_args.wandb_name)
+    i = 1
+    log_dir = os.path.join(data_args.log_dir, data_args.wandb_run)
     while os.path.exists(log_dir):
-        log_dir = os.path.join(data_args.log_dir, f'{data_args.wandb_name}_{i}')
+        log_dir = os.path.join(data_args.log_dir, f'{data_args.wandb_run}_{i}')
         i += 1
     os.makedirs(log_dir)
 
     combined_args = {**vars(data_args), **vars(model_args), **vars(train_args)}
     with open(os.path.join(log_dir, f'args.json'), 'w') as wf:
-        json.dump(vars(combined_args), wf, indent=4)
+        json.dump(combined_args, wf, indent=4)
 
     # Wandb logging
-    wandb.init(project=data_args.wandb_project, name=data_args.wandb_run)
-    wandb.config.update(combined_args)
+    run = wandb.init(project=data_args.wandb_project, name=data_args.wandb_run)
+    run.config.update(combined_args)
 
     print(f'Logging to {log_dir}.')
 
@@ -257,10 +256,10 @@ def main():
 
     # Prepare distributed data parallel
     ngpus_per_node = torch.cuda.device_count()
-    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, data_args, model_args, train_args, log_dir))
+    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, data_args, model_args, train_args, log_dir, run))
 
 
-def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
+def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run):
     global best_acc1
     print("Use GPU: {} for training".format(gpu))
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
@@ -285,7 +284,7 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
         if data_args.position_type != "no_position":
             model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
 
-    #tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+    tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
     if train_args.fp16:
         model = model.float()
     elif train_args.bf16:
@@ -296,12 +295,12 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
         f.write(param_counts_text)
 
     # Wandb logging
-    if gpu % world_size == 0
+    if gpu % world_size == 0:
         _, total_trainable_params, total_nontrainable_params = utils.get_params_count(model)
-        wandb.watch(model)
-        wandb.config.update({"total_params": total_trainable_params + total_nontrainable_params})
-        wandb.config.update({"trainable_params": total_trainable_params})
-        wandb.config.update({"non_trainable_params": total_nontrainable_params})
+        run.watch(model)
+        run.config.update({"total_params": total_trainable_params + total_nontrainable_params})
+        run.config.update({"trainable_params": total_trainable_params})
+        run.config.update({"non_trainable_params": total_nontrainable_params})
 
 
     torch.cuda.set_device(gpu)
@@ -317,8 +316,8 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
             weight_decay=train_args.weight_decay, eps=1e-8)
 
     """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
-    scheduler_steplr = StepLR(optimizer, step_size=data_args.lr_schedule_step_size * data_args.steps_per_epoch, gamma=data_args.lr_schedule_gamma)
-    scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=data_args.lr_warmup_steps, after_scheduler=scheduler_steplr)
+    scheduler_steplr = StepLR(optimizer, step_size=train_args.lr_schedule_step_size * train_args.steps_per_epoch, gamma=train_args.lr_schedule_gamma)
+    scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=train_args.lr_warmup_steps, after_scheduler=scheduler_steplr)
 
     # Detecting last checkpoint.
     if data_args.resume:
@@ -329,7 +328,7 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
             checkpoint = torch.load(data_args.resume, map_location=loc)
             train_args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.to(gpu)
+            best_acc1 = best_acc1.cuda(gpu)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
@@ -418,22 +417,22 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir):
     #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=train_args.per_device_eval_batch_size)
 
     if train_args.test:
-        evaluate_loop(test_loader, model, tokenizer, criterion, epoch, args)
+        evaluate_loop(test_loader, model, tokenizer, criterion, epoch, train_args, run)
         return
 
     for epoch in range(train_args.start_epoch, train_args.epochs):
-        if epoch == 0:
-            evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args)
+        #if epoch == 0:
+        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, train_args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
-        train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args)
+        train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, train_args, run)
         # evaluate on validation set
-        acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args)
+        acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, run)
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
-i
+
         if (epoch % save_epoch == 0 or is_best) and gpu % world_size == 0:
             # Only save non-frozen parameters.
             #stripped_state_dict = {
@@ -450,7 +449,8 @@ i
             }, is_best, os.path.join(log_dir, 'ckpt'))
 
 
-def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args)
+def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, train_args, run):
+    gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
 
     batch_time = utils.AverageMeter('Time', ':6.3f')
@@ -462,15 +462,16 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
     model.train()
     end = time.time()
-    for i, batch in enumerate(train_dataloader):
+    for i, batch in enumerate(train_loader):
         actual_step = epoch * train_args.steps_per_epoch + i + 1
         data_time.update(time.time() - end)
-
+        print("A", gpu)
         batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
-
+        print("B", gpu)
         forward_start = time.time()
         outputs = model(**batch)
         forward_time.update(time.time() - forward_start)
+        print("C", gpu)
 
         loss = outputs.loss
         loss = loss / train_args.grad_accumulation_steps
@@ -485,6 +486,7 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
             optimizer.zero_grad()
             print('=' * 80)
 
+        print("D", gpu)
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -498,16 +500,17 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
             progress.display(i + 1)
 
             if gpu % world_size == 0:
-                wandb.log({"train/loss": losses.avg}, step=actual_step)
-                wandb.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
-                wandb.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
-                wandb.log({"metrics/total_secs_captioning": forward_time.avg}, step=actual_step)
-                wandb.log({"metrics/examples_per_sec": ex_per_sec}, step=actual_step)
+                run.log({"train/loss": losses.avg}, step=actual_step)
+                run.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
+                run.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
+                run.log({"metrics/total_secs_captioning": forward_time.avg}, step=actual_step)
+                run.log({"metrics/examples_per_sec": ex_per_sec}, step=actual_step)
 
             losses.reset()
             batch_time.reset()
             data_time.reset()
             forward_time.reset()
+        print("E", gpu)
 
         if i == train_args.steps_per_epoch - 1:
             break
@@ -516,70 +519,133 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
         curr_lr = scheduler.get_last_lr()
         if actual_step == 1 or (i + 1) % train_args.print_freq == 0:
             if gpu % world_size == 0:
-                wandb.log({"train/lr": curr_lr[0]}, step=actual_step)
+                run.log({"train/lr": curr_lr[0]}, step=actual_step)
 
 
 # Evaluate loop
-def evaluate_loop(model, dataloader, prefix="eval"):
-    rouge = evaluate.load("rouge")
-    bleu = evaluate.load("bleu")
-    cider_scorer = Cider()
+def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, run, prefix="Val"):
+    gpu, world_size = dist.get_rank(), dist.get_world_size()
+    ngpus_per_node = torch.cuda.device_count()
+    bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
+    actual_step = (epoch + 1) * train_args.steps_per_epoch
 
-    def postprocess_text(preds, labels):
-        preds = [pred.strip() for pred in preds]
-        labels = [label.strip() for label in labels]
+    batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
+    losses = utils.AverageMeter('Loss', ':.4e', utils.Summary.AVERAGE)
+    #top1 = utils.AverageMeter('Acc@1', ':6.2f', utils.Summary.AVERAGE)
+    #top5 = utils.AverageMeter('Acc@5', ':6.2f', utils.Summary.AVERAGE)
+    bleu1 = utils.AverageMeter('BLEU@1', ':6.2f', utils.Summary.AVERAGE)
+    bleu2 = utils.AverageMeter('BLEU@2', ':6.2f', utils.Summary.AVERAGE)
+    bleu3 = utils.AverageMeter('BLEU@3', ':6.2f', utils.Summary.AVERAGE)
+    bleu4 = utils.AverageMeter('BLEU@4', ':6.2f', utils.Summary.AVERAGE)
 
-        # rougeLSum expects newline after each sentence
-        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
-        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+    progress = utils.ProgressMeter(len(val_loader), [batch_time, losses, bleu4], prefix=f'{prefix}: ')
 
-        return preds, labels
-
-    all_generated_texts = []
-    all_labels = []
-    total_loss = 0.
-    step = 0
-    eval_step = 1000
-    progress_bar = tqdm(range(eval_step))
+    # switch to evaluate mode
     model.eval()
     with torch.no_grad():
-        for batch in dataloader:
-            if step == eval_step:
-                break
-            batch = {k: v.to(device) for k, v in batch.items()}
+        end = time.time()
+        all_generated_captions = []
+        all_gt_captions = []
+
+        for i, batch in tqdm.tqdm(enumerate(val_loader), position=0, total=len(val_loader)):
+            batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
             outputs = model(**batch)
-            loss = outputs.loss.sum()
-
+            loss = outputs.loss
             logits = outputs.logits
-            predictions = torch.argmax(logits, dim=-1).cpu()
-            #predictions = model.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-            decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
 
-            labels = batch["labels"].cpu()
-            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-            decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            #acc1, acc5 = utils.accuracy(logits[:, :-1, :], full_labels[:, 1:], -100, topk=(1, 5))
+            #top1.update(acc1[0], logits.size(0))
+            #top5.update(acc5[0], logits.size(0))
+            losses.update(loss.item(), logits.size(0))
 
-            total_loss += loss.item()
-            decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-            all_generated_texts.extend(decoded_preds)
-            all_labels.extend(decoded_labels)
-            progress_bar.update(1)
-            step += 1
+            generated_ids = model.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
 
-    cands = {idx: [pred] for idx, pred in enumerate(all_generated_texts)}
-    refs = {idx: [label] for idx, label in enumerate(all_labels)}
-    cider_score, _ = cider_scorer.compute_score(refs, cands)
-    rouge_results = rouge.compute(predictions=all_generated_texts, references=all_labels)
-    bleu_results = bleu.compute(predictions=all_generated_texts, references=all_labels)
+            all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
+            dist.all_gather(all_generated_ids, generated_ids)
+            all_generated_ids[dist.get_rank()] = generated_ids
+            generated_ids = torch.cat(all_generated_ids)
 
-    results = {
-            f'{prefix}_loss': total_loss / step / val_batch_size,
-            f'{prefix}_bleu': bleu_results['bleu'],
-            f'{prefix}_rouge': rouge_results['rougeL'],
-            f'{prefix}_cider': cider_score,
-        }
-    #wandb.log(results)
-    print(results)
+            all_tgt_tokens = [torch.zeros_like(batch["labels"]) for _ in range(dist.get_world_size())]
+            dist.all_gather(all_tgt_tokens, tgt_tokens)
+            all_tgt_tokens[dist.get_rank()] = tgt_tokens
+            all_tgt_tokens = torch.cat(all_tgt_tokens)
+
+            all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
+            generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
+
+            for cap_i in range(len(generated_captions)):
+                stop_idx = generated_captions[cap_i].find('.')
+                if stop_idx > 5:
+                    all_generated_captions.append(generated_captions[cap_i][:stop_idx])
+                else:
+                    all_generated_captions.append(generated_captions[cap_i])
+                all_gt_captions.append([gt_captions[cap_i]])
+
+            if i == 0:
+                max_to_display = 5
+                print('=' * 30)
+                print('Generated samples:')
+                for cap_i, cap in enumerate(generated_captions[:max_to_display]):
+                    print(f'{cap_i}) {cap}')
+                print('=' * 30)
+                print('Real samples:')
+                for cap_i, cap in enumerate(gt_captions[:max_to_display]):
+                    print(f'{cap_i}) {cap}')
+                print('=' * 30)
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if i % train_args.print_freq == 0:
+                progress.display(i + 1)
+
+            if i == train_args.val_steps_per_epoch - 1:
+                break
+
+            print(f'Computing BLEU with {len(all_generated_captions)} generated captions:'
+                    f'{all_generated_captions[:5]} and {len(full_gt_captions)} groundtruth captions:',
+                    f'{full_gt_captions[:5]}.')
+
+            utils.postprocess_text(all_generated_captions, all_gt_captions)
+
+            bleu1_score = bleu_scorers[0](all_generated_captions, all_gt_captions)
+            bleu1.update(bleu1_score, 1)
+            bleu2_score = bleu_scorers[1](all_generated_captions, all_gt_captions)
+            bleu2.update(bleu2_score, 1)
+            bleu3_score = bleu_scorers[2](all_generated_captions, all_gt_captions)
+            bleu3.update(bleu3_score, 2)
+            bleu4_score = bleu_scorers[3](all_generated_captions, all_gt_captions)
+            bleu4.update(bleu4_score, 3)
+
+    batch_time.all_reduce()
+    losses.all_reduce()
+    bleu1.all_reduce()
+    bleu2.all_reduce()
+    bleu3.all_reduce()
+    bleu4.all_reduce()
+
+    progress.display_summary()
+
+    if gpu % world_size == 0:
+        run.log({"val/total_secs_per_batch": batch_time.avg}, step=actual_step)
+        run.log({"val/loss": losses.avg}, step=actual_step)
+        run.log({"val/bleu1": bleu1.avg}, step=actual_step)
+        run.log({"val/bleu2": bleu2.avg}, step=actual_step)
+        run.log({"val/bleu3": bleu3.avg}, step=actual_step)
+        run.log({"val/bleu4": bleu4.avg}, step=actual_step)
+
+    #rouge = evaluate.load("rouge")
+    #bleu = evaluate.load("bleu")
+    #cider_scorer = Cider()
+
+    #cands = {idx: [pred] for idx, pred in enumerate(all_generated_texts)}
+    #refs = {idx: [label] for idx, label in enumerate(all_labels)}
+    #cider_score, _ = cider_scorer.compute_score(refs, cands)
+    #rouge_results = rouge.compute(predictions=all_generated_texts, references=all_labels)
+    #bleu_results = bleu.compute(predictions=all_generated_texts, references=all_labels)
+
 
 if __name__ == "__main__":
     main()
