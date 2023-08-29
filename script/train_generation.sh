@@ -15,12 +15,12 @@ ulimit -c unlimited
 #export WANDB_WATCH='gradients'
 export PYTHONPATH=.
 
-#MODEL_NAME='t5-base'
+MODEL_NAME='t5-base'
 #MODEL_NAME='google/flan-t5-base'
-MODEL_NAME='google/long-t5-local-base'
+#MODEL_NAME='google/long-t5-local-base'
 #MODEL_NAME='facebook/opt-350m'
 TASK='section'
-CONTEXT='text_only'
+CONTEXT='section_only'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
@@ -28,14 +28,14 @@ python language_modelling/run_generation.py \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
-    --max_input_length 1024 \
+    --max_input_length 512 \
     --max_output_length 128 \
     --epochs 90 \
-    --steps_per_epoch 5000 \
+    --steps_per_epoch 10000 \
     --val_steps_per_epoch 500 \
     --learning_rate 5e-5 \
-    --per_device_train_batch_size 1 \
-    --per_device_val_batch_size 2 \
+    --per_device_train_batch_size 2 \
+    --per_device_val_batch_size 4 \
     --dataloader_num_workers 4 \
     --grad_accumulation_steps 8 \
     --fp16 \

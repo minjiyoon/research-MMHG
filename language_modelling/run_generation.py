@@ -415,8 +415,8 @@ def main_worker(gpu, world_size, args, log_dir, run):
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        #if epoch == 0:
-        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
+        if epoch == 0:
+            evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
@@ -529,7 +529,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
     bleu4 = utils.AverageMeter('BLEU@4', ':6.2f', utils.Summary.AVERAGE)
 
     if gpu % world_size == 0:
-        progress = utils.ProgressMeter(len(val_loader), [batch_time, losses, bleu4], prefix=f'{prefix}: ')
+        progress = utils.ProgressMeter(args.val_steps_per_epoch, [batch_time, losses], prefix=f'{prefix}: ')
 
     # switch to evaluate mode
     model.eval()
@@ -550,9 +550,11 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             #top5.update(acc5[0], logits.size(0))
             losses.update(loss.item(), logits.size(0))
 
-            generated_ids = model.module.generate(input_ids=batch["input_ids"],\
-                                            attention_mask=batch["attention_mask"],\
-                                            max_new_tokens=32)
+            #generated_ids = model.module.generate(input_ids=batch["input_ids"],\
+            #                                attention_mask=batch["attention_mask"],\
+            #                                max_new_tokens=32)
+            generated_ids = torch.argmax(logits, dim=-1)
+
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
             all_generated_ids[dist.get_rank()] = generated_ids
@@ -576,17 +578,6 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
                     all_generated_captions.append(generated_captions[cap_i])
                 all_gt_captions.append([gt_captions[cap_i]])
 
-            if i == 0 and gpu % world_size == 0:
-                print('=' * 30)
-                print('Generated samples:')
-                for cap_i, cap in enumerate(generated_captions[:max_to_display]):
-                    print(f'{cap_i}) {cap}')
-                print('=' * 30)
-                print('Real samples:')
-                for cap_i, cap in enumerate(gt_captions[:max_to_display]):
-                    print(f'{cap_i}) {cap}')
-                print('=' * 30)
-
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
@@ -597,15 +588,16 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             if i == args.val_steps_per_epoch - 1:
                 break
 
-        print('=' * 30)
-        print(f'Computing BLEU with {len(all_generated_captions)} generated captions and {len(all_gt_captions)} groundtruth captions.')
-        for cap_i, cap in enumerate(all_generated_captions[:max_to_display]):
-            print(f'{cap_i}) {cap}')
-        print('=' * 30)
-        print('Real samples:')
-        for cap_i, cap in enumerate(all_gt_captions[:max_to_display]):
-            print(f'{cap_i}) {cap}')
-        print('=' * 30)
+        if gpu % world_size == 0:
+            print('=' * 30)
+            print(f'Computing BLEU with {len(all_generated_captions)} generated captions and {len(all_gt_captions)} groundtruth captions.')
+            for cap_i, cap in enumerate(all_generated_captions[:max_to_display]):
+                print(f'{cap_i}) {cap}')
+            print('=' * 30)
+            print('Real samples:')
+            for cap_i, cap in enumerate(all_gt_captions[:max_to_display]):
+                print(f'{cap_i}) {cap}')
+            print('=' * 30)
 
         #utils.postprocess_text(all_generated_captions, all_gt_captions)
 
