@@ -10,7 +10,7 @@
 #SBATCH --exclude matrix-1-20,matrix-1-18,matrix-0-34 
 
 ulimit -c unlimited
-module load cuda-11.1.1
+#module load cuda-11.1.1
 
 #export WANDB_WATCH='gradients'
 export PYTHONPATH=.
