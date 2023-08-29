@@ -20,6 +20,7 @@ import sys
 import wandb
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
 
 from dataclasses import dataclass, field
 import time
@@ -163,7 +164,7 @@ class Arguments:
         default=100, metadata={"help": "Starting epoch."}
     )
     print_freq: Optional[int] = field(
-        default=100, metadata={"help": "print frequency (default: 10)"}
+        default=25, metadata={"help": "print frequency (default: 10)"}
     )
 
 
@@ -414,8 +415,8 @@ def main_worker(gpu, world_size, args, log_dir, run):
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        if epoch == 0:
-            evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
+        #if epoch == 0:
+        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
@@ -548,8 +549,11 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             #top5.update(acc5[0], logits.size(0))
             losses.update(loss.item(), logits.size(0))
 
-            generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=args.max_output_length)
-
+            print('B')
+            generated_ids = model.module.generate(input_ids=batch["input_ids"],\
+                                            attention_mask=batch["attention_mask"],\
+                                            max_new_tokens=32)
+            print('A')
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
             all_generated_ids[dist.get_rank()] = generated_ids
@@ -573,7 +577,9 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
                     all_generated_captions.append(generated_captions[cap_i])
                 all_gt_captions.append([gt_captions[cap_i]])
 
-            if i == 0 and gpu % world_size == 0:
+            if i % args.print_freq == 0 and  gpu % world_size == 0:
+                progress.display(i + 1)
+
                 max_to_display = 5
                 print('=' * 30)
                 print('Generated samples:')
@@ -591,13 +597,6 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
 
             if i == args.val_steps_per_epoch - 1:
                 break
-
-            if i % args.print_freq == 0 and  gpu % world_size == 0:
-                progress.display(i + 1)
-
-                print(f'Computing BLEU with {len(all_generated_captions)} generated captions:'
-                        f'{all_generated_captions[:5]} and {len(all_gt_captions)} groundtruth captions:',
-                        f'{all_gt_captions[:5]}.')
 
             #utils.postprocess_text(all_generated_captions, all_gt_captions)
 

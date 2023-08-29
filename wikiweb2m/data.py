@@ -18,11 +18,11 @@ def load_wikiweb2m_tf(task):
     return train_dataset, val_dataset[:10000], test_dataset[:10000]
 
 def load_wikiweb2m(task):
-    train_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_train.parquet')
-    val_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_val.parquet')
-    test_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_test.parquet')
+    train_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_train_large.parquet')
+    val_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_val_large.parquet')
+    test_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_test_large.parquet')
 
-    with open(f'./wikiweb2m/raw/{task}_id_split.pkl', 'rb') as f:
+    with open(f'./wikiweb2m/raw/{task}_id_split_large.pkl', 'rb') as f:
         id_list = pickle.load(f)
 
     return train_df, val_df, test_df, id_list
