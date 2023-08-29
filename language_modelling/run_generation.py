@@ -603,7 +603,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             print(f'{cap_i}) {cap}')
         print('=' * 30)
         print('Real samples:')
-        for cap_i, cap in enumerate(allgt_captions[:max_to_display]):
+        for cap_i, cap in enumerate(all_gt_captions[:max_to_display]):
             print(f'{cap_i}) {cap}')
         print('=' * 30)
 

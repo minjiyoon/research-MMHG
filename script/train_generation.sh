@@ -31,8 +31,8 @@ python language_modelling/run_generation.py \
     --max_input_length 1024 \
     --max_output_length 128 \
     --epochs 90 \
-    --steps_per_epoch 3000 \
-    --val_steps_per_epoch 300 \
+    --steps_per_epoch 5000 \
+    --val_steps_per_epoch 500 \
     --learning_rate 5e-5 \
     --per_device_train_batch_size 1 \
     --per_device_val_batch_size 2 \
