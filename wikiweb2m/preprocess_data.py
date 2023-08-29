@@ -99,24 +99,24 @@ class DataParser():
         test_df = pd.DataFrame(columns=columns)
 
         for page_id, d in enumerate(self.dataset):
-            if page_id % 10000 == 0:
+            if page_id % 100000 == 0:
                 print(page_id, 'have processed...')
-            if page_id == 60000:
+            if page_id == 600000:
                 break
             split = d[0]['split'].numpy().decode()
             #if split == "train":
-            if page_id < 40000:
+            if page_id < 400000:
                 train_df.loc[len(train_df)] = convert_to_scipy(page_id, d)
             #elif split == "val":
-            elif page_id < 50000:
+            elif page_id < 500000:
                 val_df.loc[len(val_df)] = convert_to_scipy(page_id, d)
             else:
                 test_df.loc[len(test_df)] = convert_to_scipy(page_id, d)
 
         print(f'train_num: ', len(train_df), ', val_num: ', len(val_df), ', test_num: ', len(test_df))
-        train_df.to_parquet(f'{self.path}/wikiweb2m_train.parquet')
-        val_df.to_parquet(f'{self.path}/wikiweb2m_val.parquet')
-        test_df.to_parquet(f'{self.path}/wikiweb2m_test.parquet')
+        train_df.to_parquet(f'{self.path}/wikiweb2m_train_large.parquet')
+        val_df.to_parquet(f'{self.path}/wikiweb2m_val_large.parquet')
+        test_df.to_parquet(f'{self.path}/wikiweb2m_test_large.parquet')
 
     def save_list(self):
         #page_list = defaultdict(list)

@@ -22,7 +22,10 @@ def load_wikiweb2m(task):
     val_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_val.parquet')
     test_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_test.parquet')
 
-    return train_df, val_df, test_df
+    with open(f'./wikiweb2m/raw/{task}_id_split.pkl', 'rb') as f:
+        id_list = pickle.load(f)
+
+    return train_df, val_df, test_df, id_list
 
 
 class WikiWeb2M(torch.utils.data.Dataset):
@@ -52,13 +55,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
         return ", ".join([page_title, page_description])
 
     def get_section_info(self, section_id, d, remove_summary=True):
-        page_title = d[0]['page_title'].numpy().decode()
-        section_title = tf.sparse.to_dense(d[1]['section_title'])[section_id][0].numpy().decode()
-        section_depth = str(tf.sparse.to_dense(d[1]['section_depth'])[section_id][0].numpy())
-        section_heading = str(tf.sparse.to_dense(d[1]['section_heading_level'])[section_id][0].numpy())
-        section_parent_index = str(tf.sparse.to_dense(d[1]['section_parent_index'])[section_id][0].numpy())
-        section_summary = tf.sparse.to_dense(d[1]['section_clean_1st_sentence'])[section_id][0].numpy().decode()
-        section_rest_sentence = tf.sparse.to_dense(d[1]['section_rest_sentence'])[section_id][0].numpy().decode()
+        page_title = d['page_title'].decode()
+        section_title = d['section_title'][section_id].decode()
+        section_depth = str(d['section_depth'][section_id])
+        section_heading = str(d['section_heading'][section_id])
+        section_parent_index = str(d['section_parent_index'][section_id])
+        section_summary = d['section_summary'][section_id].decode()
+        section_rest_sentence = d['section_rest_sentence'][section_id].decode()
         if remove_summary:
             #return ", ".join([section_title, section_depth, section_heading, section_parent_index, section_rest_sentence]), section_summary
             return ", ".join([section_rest_sentence]), section_summary
@@ -93,7 +96,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
     def __getitem__(self, index):
         if self.task == "section":
             page_id, section_id = self.id_list[index]
-            section_id, d = self.data_list[index]
+            d = self.df[self.df['page_id'] == page_id].iloc[0]
             if self.context == "section_only":
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
                 inputs = "summarize: " + section_info

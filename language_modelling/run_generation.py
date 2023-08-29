@@ -19,6 +19,8 @@ import json
 import sys
 import wandb
 import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 from dataclasses import dataclass, field
 import time
 from time import perf_counter
@@ -70,7 +72,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 best_acc1 = 0  # Variable to keep track of best model so far.
 
 @dataclass
-class DataArguments:
+class Arguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
 
@@ -121,8 +123,6 @@ class DataArguments:
         default=None, metadata={"help": "path to latest checkpoint (default: none)"}
     )
 
-@dataclass
-class TrainingArguments:
     seed: Optional[int] = field(
         default=None, metadata={"help": "seed for initializing training."}
     )
@@ -160,10 +160,10 @@ class TrainingArguments:
         default=1000, metadata={"help": "Number of training steps per epoch."}
     )
     save_epoch: Optional[int] = field(
-        default=10, metadata={"help": "Starting epoch."}
+        default=100, metadata={"help": "Starting epoch."}
     )
     print_freq: Optional[int] = field(
-        default=10, metadata={"help": "print frequency (default: 10)"}
+        default=100, metadata={"help": "print frequency (default: 10)"}
     )
 
 
@@ -198,13 +198,6 @@ class TrainingArguments:
         default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
 
-
-@dataclass
-class ModelArguments:
-    """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
-    """
-
     model_name_or_path: str = field(
         default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
@@ -218,35 +211,35 @@ class ModelArguments:
 
 def main():
 
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, train_args = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser((Arguments))
+    args = parser.parse_args_into_dataclasses()[0]
 
-    if data_args.duplicate_encoding is False and data_args.position_type != "no_position":
+    if args.duplicate_encoding is False and args.position_type != "no_position":
         raise ValueError(
-                f"duplicate_encoding: {data_args.duplicate_encoding} and "
-                + f"position_type: {data_args.position_type} cannot be set together"
+                f"duplicate_encoding: {args.duplicate_encoding} and "
+                + f"position_type: {args.position_type} cannot be set together"
             )
 
     i = 1
-    log_dir = os.path.join(data_args.log_dir, data_args.wandb_run)
+    log_dir = os.path.join(args.log_dir, args.wandb_run)
     while os.path.exists(log_dir):
-        log_dir = os.path.join(data_args.log_dir, f'{data_args.wandb_run}_{i}')
+        log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
         i += 1
     os.makedirs(log_dir)
 
-    combined_args = {**vars(data_args), **vars(model_args), **vars(train_args)}
+    combined_args = {**vars(args), **vars(args), **vars(args)}
     with open(os.path.join(log_dir, f'args.json'), 'w') as wf:
         json.dump(combined_args, wf, indent=4)
 
     # Wandb logging
-    run = wandb.init(project=data_args.wandb_project, name=data_args.wandb_run)
+    run = wandb.init(project=args.wandb_project, name=args.wandb_run)
     run.config.update(combined_args)
 
     print(f'Logging to {log_dir}.')
 
-    if train_args.seed is not None:
-        random.seed(train_args.seed)
-        torch.manual_seed(train_args.seed)
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
         cudnn.deterministic = True
         warnings.warn('You have chosen to seed training. '
                 'This will turn on the CUDNN deterministic setting, '
@@ -256,38 +249,38 @@ def main():
 
     # Prepare distributed data parallel
     ngpus_per_node = torch.cuda.device_count()
-    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, data_args, model_args, train_args, log_dir, run))
+    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, log_dir, run))
 
 
-def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run):
+def main_worker(gpu, world_size, args, log_dir, run):
     global best_acc1
     print("Use GPU: {} for training".format(gpu))
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
 
     # Prepare pretrained model
-    if "t5" in model_args.model_name_or_path:
-        config = AutoConfig.from_pretrained(model_args.model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=False)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_args.model_name_or_path, config=config)
-    elif "opt" in model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=False)
-        model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, config=config)
+    if "t5" in args.model_name_or_path:
+        config = AutoConfig.from_pretrained(args.model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
+        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
+    elif "opt" in args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         config = TDOConfig.from_pretrained(
-                model_args.model_name_or_path,
-                cache_dir=model_args.cache_dir)
+                args.model_name_or_path,
+                cache_dir=args.cache_dir)
         model = TDOForMaskedLM.from_pretrained(
-                model_args.model_name_or_path,
+                args.model_name_or_path,
                 config=config,
-                cache_dir=model_args.cache_dir)
-        if data_args.position_type != "no_position":
+                cache_dir=args.cache_dir)
+        if args.position_type != "no_position":
             model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
 
     tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
-    if train_args.fp16:
+    if args.fp16:
         model = model.float()
-    elif train_args.bf16:
+    elif args.bf16:
         model = model.bfloat16()
 
     param_counts_text = utils.get_params_count_str(model)
@@ -311,41 +304,41 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
     criterion = nn.CrossEntropyLoss().cuda(gpu)
     optimizer_cls = torch.optim.AdamW
     print('Using torch.optim.AdamW as the optimizer.')
-    optimizer = optimizer_cls(model.parameters(), train_args.learning_rate,
-            betas=(train_args.adam_beta1, train_args.adam_beta2),
-            weight_decay=train_args.weight_decay, eps=1e-8)
+    optimizer = optimizer_cls(model.parameters(), args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.weight_decay, eps=1e-8)
 
     """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
-    scheduler_steplr = StepLR(optimizer, step_size=train_args.lr_schedule_step_size * train_args.steps_per_epoch, gamma=train_args.lr_schedule_gamma)
-    scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=train_args.lr_warmup_steps, after_scheduler=scheduler_steplr)
+    scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
+    scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
 
     # Detecting last checkpoint.
-    if data_args.resume:
-        if os.path.isfile(data_args.resume):
-            print("=> loading checkpoint '{}'".format(data_args.resume))
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
             # Map model to be loaded to specified single gpu.
             loc = 'cuda:{}'.format(gpu)
-            checkpoint = torch.load(data_args.resume, map_location=loc)
-            train_args.start_epoch = checkpoint['epoch']
+            checkpoint = torch.load(args.resume, map_location=loc)
+            args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
             best_acc1 = best_acc1.cuda(gpu)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
-            print("=> loaded checkpoint '{}' (epoch {})".format(data_args.resume, checkpoint['epoch']))
+            print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(data_args.resume))
+            print("=> no checkpoint found at '{}'".format(args.resume))
 
     cudnn.benchmark = True
 
     # Prepare Dataset
     start_time = perf_counter()
-    train_data, val_data, test_data = load_wikiweb2m(data_args.task)
+    train_data, val_data, test_data, id_list = load_wikiweb2m(args.task)
     print(f'Loading wikiweb2m done: {perf_counter()-start_time}')
     start_time = perf_counter()
-    train_dataset = WikiWeb2M(data_args, train_data, tokenizer, model_args.visual_model)
-    val_dataset = WikiWeb2M(data_args, val_data, tokenizer, model_args.visual_model)
-    test_dataset = WikiWeb2M(data_args, test_data, tokenizer, model_args.visual_model)
+    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model)
+    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model)
+    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model)
     print(f'Initialize datasets: {perf_counter()-start_time}')
     print(f'Training with {len(train_dataset)} examples, validating with {len(val_dataset)} examples, testing with {len(test_dataset)} examples.')
 
@@ -356,12 +349,12 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
 
     # Dataloader
     start_time = perf_counter()
-    train_loader = DataLoader(train_dataset, batch_size=train_args.per_device_train_batch_size,
-            shuffle=False, num_workers=train_args.dataloader_num_workers, pin_memory=True, sampler=train_sampler)
-    val_loader = DataLoader(val_dataset, batch_size=train_args.per_device_val_batch_size,
-            shuffle=False, num_workers=train_args.dataloader_num_workers, pin_memory=True, sampler=val_sampler)
-    test_loader = DataLoader(test_dataset, batch_size=train_args.per_device_val_batch_size,
-            shuffle=False, num_workers=train_args.dataloader_num_workers, pin_memory=True, sampler=test_sampler)
+    train_loader = DataLoader(train_dataset, batch_size=args.per_device_train_batch_size,
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=train_sampler)
+    val_loader = DataLoader(val_dataset, batch_size=args.per_device_val_batch_size,
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=val_sampler)
+    test_loader = DataLoader(test_dataset, batch_size=args.per_device_val_batch_size,
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=test_sampler)
     print(f'Initialize dataloaders: {perf_counter()-start_time}')
 
     # Example Dataset
@@ -375,8 +368,8 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
     #    inputs = examples[text_column]
     #    targets = examples[summary_column]
     #    inputs = [prefix + inp for inp in inputs]
-    #    model_inputs = tokenizer(inputs, max_length=data_args.max_input_length, padding="max_length", truncation=True)
-    #    labels = tokenizer(text_target=targets, max_length=data_args.max_output_length, padding="max_length", truncation=True)
+    #    model_inputs = tokenizer(inputs, max_length=args.max_input_length, padding="max_length", truncation=True)
+    #    labels = tokenizer(text_target=targets, max_length=args.max_output_length, padding="max_length", truncation=True)
 
     #    labels["input_ids"] = [
     #        [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
@@ -387,17 +380,17 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
     #train_dataset = raw_datasets["train"].map(
     #    preprocess_function,
     #    batched=True,
-    #    num_proc=train_args.dataloader_num_workers,
+    #    num_proc=args.dataloader_num_workers,
     #    remove_columns=column_names,
     #    load_from_cache_file=True,
     #    desc="Running tokenizer on dataset",
     #)
 
-    #max_target_length = data_args.max_output_length
+    #max_target_length = args.max_output_length
     #eval_dataset = raw_datasets["validation"].map(
     #    preprocess_function,
     #    batched=True,
-    #    num_proc=train_args.dataloader_num_workers,
+    #    num_proc=args.dataloader_num_workers,
     #    remove_columns=column_names,
     #    load_from_cache_file=True,
     #    desc="Running tokenizer on dataset",
@@ -412,23 +405,23 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
     #)
 
     #train_dataloader = DataLoader(
-    #    train_dataset, shuffle=True, collate_fn=data_collator, batch_size=train_args.per_device_train_batch_size
+    #    train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     #)
-    #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=train_args.per_device_eval_batch_size)
+    #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
-    if train_args.test:
-        evaluate_loop(test_loader, model, tokenizer, criterion, epoch, train_args, run)
+    if args.test:
+        evaluate_loop(test_loader, model, tokenizer, criterion, epoch, args, run)
         return
 
-    for epoch in range(train_args.start_epoch, train_args.epochs):
-        #if epoch == 0:
-        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, train_args, run)
+    for epoch in range(args.start_epoch, args.epochs):
+        if epoch == 0:
+            evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
-        train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, train_args, run)
+        train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run)
         # evaluate on validation set
-        acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, run)
+        acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run)
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
@@ -449,7 +442,7 @@ def main_worker(gpu, world_size, data_args, model_args, train_args, log_dir, run
             }, is_best, os.path.join(log_dir, 'ckpt'))
 
 
-def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, train_args, run):
+def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
 
@@ -458,46 +451,43 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
     forward_time = utils.AverageMeter('Forward', ':6.3f')
     losses = utils.AverageMeter('Loss', ':.4e')
 
-    progress = utils.ProgressMeter(train_args.steps_per_epoch, [batch_time, losses], prefix="Epoch: [{}]".format(epoch))
+    if gpu % world_size == 0:
+        progress = utils.ProgressMeter(args.steps_per_epoch, [batch_time, losses], prefix="Epoch: [{}]".format(epoch))
 
     model.train()
     end = time.time()
     for i, batch in enumerate(train_loader):
-        actual_step = epoch * train_args.steps_per_epoch + i + 1
+        actual_step = epoch * args.steps_per_epoch + i + 1
         data_time.update(time.time() - end)
-        print("A", gpu)
         batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
-        print("B", gpu)
         forward_start = time.time()
         outputs = model(**batch)
         forward_time.update(time.time() - forward_start)
-        print("C", gpu)
 
         loss = outputs.loss
-        loss = loss / train_args.grad_accumulation_steps
+        loss = loss / args.grad_accumulation_steps
         losses.update(loss.item(), batch["input_ids"].size(0))
         loss.backward()
 
         # Update weights
-        if ((i + 1) % train_args.grad_accumulation_steps == 0) or (i == train_args.steps_per_epoch - 1):
-            if train_args.grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), train_args.grad_clip)
+        if ((i + 1) % args.grad_accumulation_steps == 0) or (i == args.steps_per_epoch - 1):
+            if args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
             optimizer.zero_grad()
-            print('=' * 80)
 
-        print("D", gpu)
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-        if actual_step == 1 or (i + 1) % train_args.print_freq == 0:
+        if actual_step == 1 or (i + 1) % args.print_freq == 0:
             losses.all_reduce()
             batch_time.all_reduce()
             data_time.all_reduce()
             forward_time.all_reduce()
-            ex_per_sec = (train_args.per_device_train_batch_size / batch_time.avg) * ngpus_per_node
+            ex_per_sec = (args.per_device_train_batch_size / batch_time.avg) * ngpus_per_node
 
-            progress.display(i + 1)
+            if gpu % world_size == 0:
+                progress.display(i + 1)
 
             if gpu % world_size == 0:
                 run.log({"train/loss": losses.avg}, step=actual_step)
@@ -510,24 +500,23 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
             batch_time.reset()
             data_time.reset()
             forward_time.reset()
-        print("E", gpu)
 
-        if i == train_args.steps_per_epoch - 1:
+        if i == args.steps_per_epoch - 1:
             break
 
-        lr_scheduler.step()
+        scheduler.step()
         curr_lr = scheduler.get_last_lr()
-        if actual_step == 1 or (i + 1) % train_args.print_freq == 0:
+        if actual_step == 1 or (i + 1) % args.print_freq == 0:
             if gpu % world_size == 0:
                 run.log({"train/lr": curr_lr[0]}, step=actual_step)
 
 
 # Evaluate loop
-def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, run, prefix="Val"):
+def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, prefix="Val"):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
-    actual_step = (epoch + 1) * train_args.steps_per_epoch
+    actual_step = (epoch + 1) * args.steps_per_epoch
 
     batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
     losses = utils.AverageMeter('Loss', ':.4e', utils.Summary.AVERAGE)
@@ -538,7 +527,8 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, ru
     bleu3 = utils.AverageMeter('BLEU@3', ':6.2f', utils.Summary.AVERAGE)
     bleu4 = utils.AverageMeter('BLEU@4', ':6.2f', utils.Summary.AVERAGE)
 
-    progress = utils.ProgressMeter(len(val_loader), [batch_time, losses, bleu4], prefix=f'{prefix}: ')
+    if gpu % world_size == 0:
+        progress = utils.ProgressMeter(len(val_loader), [batch_time, losses, bleu4], prefix=f'{prefix}: ')
 
     # switch to evaluate mode
     model.eval()
@@ -558,14 +548,15 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, ru
             #top5.update(acc5[0], logits.size(0))
             losses.update(loss.item(), logits.size(0))
 
-            generated_ids = model.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+            generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=args.max_output_length)
 
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
             all_generated_ids[dist.get_rank()] = generated_ids
             generated_ids = torch.cat(all_generated_ids)
 
-            all_tgt_tokens = [torch.zeros_like(batch["labels"]) for _ in range(dist.get_world_size())]
+            tgt_tokens = batch["labels"]
+            all_tgt_tokens = [torch.zeros_like(tgt_tokens) for _ in range(dist.get_world_size())]
             dist.all_gather(all_tgt_tokens, tgt_tokens)
             all_tgt_tokens[dist.get_rank()] = tgt_tokens
             all_tgt_tokens = torch.cat(all_tgt_tokens)
@@ -582,7 +573,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, ru
                     all_generated_captions.append(generated_captions[cap_i])
                 all_gt_captions.append([gt_captions[cap_i]])
 
-            if i == 0:
+            if i == 0 and gpu % world_size == 0:
                 max_to_display = 5
                 print('=' * 30)
                 print('Generated samples:')
@@ -598,17 +589,17 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, ru
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if i % train_args.print_freq == 0:
-                progress.display(i + 1)
-
-            if i == train_args.val_steps_per_epoch - 1:
+            if i == args.val_steps_per_epoch - 1:
                 break
 
-            print(f'Computing BLEU with {len(all_generated_captions)} generated captions:'
-                    f'{all_generated_captions[:5]} and {len(full_gt_captions)} groundtruth captions:',
-                    f'{full_gt_captions[:5]}.')
+            if i % args.print_freq == 0 and  gpu % world_size == 0:
+                progress.display(i + 1)
 
-            utils.postprocess_text(all_generated_captions, all_gt_captions)
+                print(f'Computing BLEU with {len(all_generated_captions)} generated captions:'
+                        f'{all_generated_captions[:5]} and {len(all_gt_captions)} groundtruth captions:',
+                        f'{all_gt_captions[:5]}.')
+
+            #utils.postprocess_text(all_generated_captions, all_gt_captions)
 
             bleu1_score = bleu_scorers[0](all_generated_captions, all_gt_captions)
             bleu1.update(bleu1_score, 1)
@@ -626,9 +617,9 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, train_args, ru
     bleu3.all_reduce()
     bleu4.all_reduce()
 
-    progress.display_summary()
-
     if gpu % world_size == 0:
+        progress.display_summary()
+
         run.log({"val/total_secs_per_batch": batch_time.avg}, step=actual_step)
         run.log({"val/loss": losses.avg}, step=actual_step)
         run.log({"val/bleu1": bleu1.avg}, step=actual_step)

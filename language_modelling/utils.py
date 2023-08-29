@@ -3,6 +3,7 @@ from transformers import AutoFeatureExtractor
 from PIL import Image
 import shutil
 import torch
+import torch.distributed as dist
 
 import nltk
 try:
