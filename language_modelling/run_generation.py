@@ -537,6 +537,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         end = time.time()
         all_generated_captions = []
         all_gt_captions = []
+        max_to_display = 5
 
         for i, batch in tqdm.tqdm(enumerate(val_loader), position=0, total=len(val_loader)):
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
@@ -549,11 +550,9 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             #top5.update(acc5[0], logits.size(0))
             losses.update(loss.item(), logits.size(0))
 
-            print('B')
             generated_ids = model.module.generate(input_ids=batch["input_ids"],\
                                             attention_mask=batch["attention_mask"],\
                                             max_new_tokens=32)
-            print('A')
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
             all_generated_ids[dist.get_rank()] = generated_ids
@@ -577,10 +576,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
                     all_generated_captions.append(generated_captions[cap_i])
                 all_gt_captions.append([gt_captions[cap_i]])
 
-            if i % args.print_freq == 0 and  gpu % world_size == 0:
-                progress.display(i + 1)
-
-                max_to_display = 5
+            if i == 0 and gpu % world_size == 0:
                 print('=' * 30)
                 print('Generated samples:')
                 for cap_i, cap in enumerate(generated_captions[:max_to_display]):
@@ -595,19 +591,32 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             batch_time.update(time.time() - end)
             end = time.time()
 
+            if i % args.print_freq == 0 and  gpu % world_size == 0:
+                progress.display(i + 1)
+
             if i == args.val_steps_per_epoch - 1:
                 break
 
-            #utils.postprocess_text(all_generated_captions, all_gt_captions)
+        print('=' * 30)
+        print(f'Computing BLEU with {len(all_generated_captions)} generated captions and {len(all_gt_captions)} groundtruth captions.')
+        for cap_i, cap in enumerate(all_generated_captions[:max_to_display]):
+            print(f'{cap_i}) {cap}')
+        print('=' * 30)
+        print('Real samples:')
+        for cap_i, cap in enumerate(allgt_captions[:max_to_display]):
+            print(f'{cap_i}) {cap}')
+        print('=' * 30)
 
-            bleu1_score = bleu_scorers[0](all_generated_captions, all_gt_captions)
-            bleu1.update(bleu1_score, 1)
-            bleu2_score = bleu_scorers[1](all_generated_captions, all_gt_captions)
-            bleu2.update(bleu2_score, 1)
-            bleu3_score = bleu_scorers[2](all_generated_captions, all_gt_captions)
-            bleu3.update(bleu3_score, 2)
-            bleu4_score = bleu_scorers[3](all_generated_captions, all_gt_captions)
-            bleu4.update(bleu4_score, 3)
+        #utils.postprocess_text(all_generated_captions, all_gt_captions)
+
+        bleu1_score = bleu_scorers[0](all_generated_captions, all_gt_captions)
+        bleu1.update(bleu1_score, 1)
+        bleu2_score = bleu_scorers[1](all_generated_captions, all_gt_captions)
+        bleu2.update(bleu2_score, 1)
+        bleu3_score = bleu_scorers[2](all_generated_captions, all_gt_captions)
+        bleu3.update(bleu3_score, 2)
+        bleu4_score = bleu_scorers[3](all_generated_captions, all_gt_captions)
+        bleu4.update(bleu4_score, 3)
 
     batch_time.all_reduce()
     losses.all_reduce()
@@ -626,6 +635,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         run.log({"val/bleu3": bleu3.avg}, step=actual_step)
         run.log({"val/bleu4": bleu4.avg}, step=actual_step)
 
+    return bleu4.avg
     #rouge = evaluate.load("rouge")
     #bleu = evaluate.load("bleu")
     #cider_scorer = Cider()

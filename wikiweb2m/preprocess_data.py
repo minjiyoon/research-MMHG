@@ -230,13 +230,13 @@ class DataParser():
     def split_ids(self, task):
         id_list = defaultdict(list)
         for page_id, d in enumerate(self.dataset):
-            if page_id % 10000 == 0:
+            if page_id % 100000 == 0:
                 print(page_id, 'have processed...')
-            if page_id == 60000:
+            if page_id == 600000:
                 break
-            if page_id < 40000:
+            if page_id < 400000:
                 split = "train"
-            elif page_id < 50000:
+            elif page_id < 500000:
                 split = "val"
             else:
                 split = "test"
@@ -255,7 +255,7 @@ class DataParser():
                     id_list[split].append((page_id, section_id))
 
         print(f'task: {task}, train_num: ', len(id_list['train']), ', val_num: ', len(id_list['val']), ', test_num: ', len(id_list['test']))
-        with open(f'{self.path}/{task}_id_split.pkl', 'wb') as file:
+        with open(f'{self.path}/{task}_id_split_large.pkl', 'wb') as file:
             pickle.dump(id_list, file)
 
 
@@ -309,5 +309,5 @@ if __name__ == "__main__":
     parser = DataParser()
     #parser.convert_to_numpy()
     #parser.split_preprocess()
-    #parser.split_ids('section')
-    parser.save_df_torch()
+    parser.split_ids('section')
+    #parser.save_df_torch()

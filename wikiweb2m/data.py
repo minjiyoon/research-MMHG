@@ -48,10 +48,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
         return len(self.id_list)
 
     def get_page_info(self, d):
-        page_url = d[0]['page_url'].numpy().decode()
-        page_title = d[0]['page_title'].numpy().decode()
-        page_description = d[0]['clean_page_description'].numpy().decode()
-        #return ", ".join([page_url, page_title, page_description])
+        page_url = d['page_url'].decode()
+        page_title = d['page_title'].decode()
+        page_description = d['page_description'].decode()
+        #return ", ".join([page_title, page_url, page_description])
         return ", ".join([page_title, page_description])
 
     def get_section_info(self, section_id, d, remove_summary=True):
@@ -103,9 +103,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
             elif self.context == "text_only":
                 page_info = self.get_page_info(d)
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
                 context_info = []
-                for context_id in range(context_num):
+                for context_id in range(len(d['section_title'])):
                     if context_id == section_id:
                         continue
                     context_info.append(self.get_section_info(context_id, d, remove_summary=False))
