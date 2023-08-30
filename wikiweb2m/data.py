@@ -41,8 +41,9 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
 
-        if feature_extractor_model is not None and self.context == 'all':
+        if feature_extractor_model is not None and self.context in ('section_all', 'all'):
             self.feature_extractor = utils.get_feature_extractor_for_model(feature_extractor_model)
+            self.n_visual_tokens = args.n_visual_tokens
 
     def __len__(self):
         return len(self.id_list)
@@ -69,21 +70,23 @@ class WikiWeb2M(torch.utils.data.Dataset):
             #return ", ".join([section_title, section_depth, section_heading, section_parent_index, section_summary, section_rest_sentence])
             return ", ".join([section_summary, section_rest_sentence])
 
-    def get_section_images(self, section_id, d, omit_image_id=-1):
-        image_urls =  tf.sparse.to_dense(d[1]['section_image_url'])
-        section_image_info = []
+    def get_section_images(self, section_id, d):
+        section_images = []
+        section_captions = []
+        section_num = d['section_title'].shape[0]
+        image_urls = d['image_url'].reshape(section_num, -1)
+        image_captions = d['image_caption'].reshape(section_num, -1)
         for image_id in range(image_urls[section_id].shape[0]):
-            if image_urls[section_id][image_id].numpy() == b'':
+            if image_urls[section_id][image_id] == b'':
                 continue
-            if image_id == omit_image_id:
-                continue
-            image_url = image_urls[section_id][image_id].numpy().decode()
-            image_caption = tf.sparse.to_dense(d[1]['section_image_captions'])[section_id][image_id].numpy().decode()
+            image_caption = image_captions[section_id][image_id].decode()
+            section_captions.append(image_caption)
 
+            image_url = image_urls[section_id][image_id].decode()
             img = Image.open(urlopen(image_url))
             image = utils.get_pixel_values_for_model(self.feature_extractor, img)
-            section_image_info.append((image, image_caption))
-        return section_image_info
+            section_images.append(image)
+        return ", ".join(section_captions), section_images
 
     def get_image_info(self, section_id, image_id, d, remove_caption=True):
         image_url =  tf.sparse.to_dense(d[1]['section_image_url'])[section_id][image_id].numpy().decode()
@@ -97,9 +100,27 @@ class WikiWeb2M(torch.utils.data.Dataset):
         if self.task == "section":
             page_id, section_id = self.id_list[index]
             d = self.df[self.df['page_id'] == page_id].iloc[0]
+            images = None
             if self.context == "section_only":
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
                 inputs = "summarize: " + section_info
+                inputs = ' '.join(inputs.replace('\n', '').split())
+                model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+
+            elif self.context == "section_all":
+                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+                image_captions, images = self.get_section_images(section_id, d)
+                inputs = "summarize: " + section_info + image_captions
+
+                max_text_len = self.max_input_length - len(images) * self.n_visual_tokens
+                input_ids = self.tokenizer(inputs, max_length=max_text_len, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                text_len = torch.LongTensor(input_ids.shape[0])
+                if len(images) > 0 :
+                    input_ids = torch.cat([input_ids, torch.LongTensor(len(images) * len(images[0]) * [-1])], dim=0)
+                assert input_ids.shape[0] == text_len.shape[0] + len(images) * self.n_visual_tokens
+                model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
+                assert (model_inputs.input_ids[0] == -1).sum() == len(images) * self.n_visual_tokens
+
             elif self.context == "text_only":
                 page_info = self.get_page_info(d)
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
@@ -110,26 +131,25 @@ class WikiWeb2M(torch.utils.data.Dataset):
                     context_info.append(self.get_section_info(context_id, d, remove_summary=False))
                 context_info = ', '.join(context_info)
                 inputs = "summarize: " + section_info + ", context: " + page_info + context_info
+                inputs = ' '.join(inputs.replace('\n', '').split())
+                model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+
             elif self.context == "all":
                 page_info = self.get_page_info(d)
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                section_image_info = self.get_section_images(section_id, d)
-                context_num = tf.sparse.to_dense(d[1]['section_title']).shape[0]
+                image_captions, images = self.get_section_images(section_id, d)
+
                 context_info = []
-                for context_id in range(context_num):
+                for context_id in range(len(d['section_title'])):
                     if context_id == section_id:
                         continue
-                    context_text = self.get_section_info(context_id, d, remove_summary=False)
-                    context_image = self.get_section_images(context_id, d)
-                    context_info.append((context_text, context_info))
+                    context_info.append(self.get_section_info(context_id, d, remove_summary=False))
+                    image_captions, images = self.get_section_images(section_id, d)
                 context_info = ', '.join(context_info)
                 inputs = "summarize: " + section_info + ", context: " + page_info + context_info
 
-        inputs, labels = inputs.replace('\n', ''), labels.replace('\n', '')
-        inputs, labels = ' '.join(inputs.split()), ' '.join(labels.split())
-
         # Tokenize
-        model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+        labels = ' '.join(labels.replace('\n', '').split())
         labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
         labels_with_ignore_index = [label if label != 0 else -100 for label in labels[0]]
 
@@ -137,11 +157,11 @@ class WikiWeb2M(torch.utils.data.Dataset):
         attention_mask = model_inputs.attention_mask[0]
         labels = torch.LongTensor(labels_with_ignore_index)
 
-        return {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels
-                }
+        if self.context in ("sectin_all", "all"):
+            #if images is not None and len(images) > 0:
+            return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "text_len": text_len}
+        else:
+            return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
     @torch.no_grad()
     def collate(self, items):

@@ -63,6 +63,7 @@ from wikiweb2m import load_wikiweb2m, WikiWeb2M
 from wikiweb2m.cider import Cider
 
 from language_modelling import utils
+from model import T5Image
 #from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -161,10 +162,10 @@ class Arguments:
         default=1000, metadata={"help": "Number of training steps per epoch."}
     )
     save_epoch: Optional[int] = field(
-        default=100, metadata={"help": "Starting epoch."}
+        default=1, metadata={"help": "Starting epoch."}
     )
     print_freq: Optional[int] = field(
-        default=25, metadata={"help": "print frequency (default: 10)"}
+        default=50, metadata={"help": "print frequency (default: 10)"}
     )
 
 
@@ -207,6 +208,12 @@ class Arguments:
     )
     visual_model: str = field(
         default="openai/clip-vit-base-patch16", metadata={"help": "visual model to encode neighbor images"}
+    )
+    n_visual_tokens: int = field(
+        default=3, metadata={"help": "visual model to encode neighbor images"}
+    )
+    freeze_lm: Optional[bool] = field(
+        default=False, metadata={"help": "evaluate model on validation set."}
     )
 
 
@@ -259,7 +266,10 @@ def main_worker(gpu, world_size, args, log_dir, run):
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
 
     # Prepare pretrained model
-    if "t5" in args.model_name_or_path:
+    if args.context in ("section_all", "all"):
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
+        model = T5Image(args, tokenizer)
+    elif "t5" in args.model_name_or_path:
         config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
@@ -415,8 +425,8 @@ def main_worker(gpu, world_size, args, log_dir, run):
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        if epoch == 0:
-            evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
+        #if epoch == 0:
+        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
@@ -424,23 +434,23 @@ def main_worker(gpu, world_size, args, log_dir, run):
         # evaluate on validation set
         acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run)
         # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
+        #is_best = acc1 > best_acc1
+        #best_acc1 = max(acc1, best_acc1)
 
-        if (epoch % save_epoch == 0 or is_best) and gpu % world_size == 0:
-            # Only save non-frozen parameters.
-            #stripped_state_dict = {
-            #    k: v for k, v in model.state_dict().items() if
-            #    ('.lm' not in k and '.visual_model' not in k)
-            #}
-            #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
-            utils.save_checkpoint({
-                'epoch': epoch + 1,
-                #'state_dict': stripped_state_dict,
-                'best_acc1': best_acc1,
-                #'optimizer' : optimizer.state_dict(),
-                #'scheduler' : scheduler.state_dict()
-            }, is_best, os.path.join(log_dir, 'ckpt'))
+        #if (epoch % args.save_epoch == 0 or is_best) and gpu % world_size == 0:
+        #    # Only save non-frozen parameters.
+        #    #stripped_state_dict = {
+        #    #    k: v for k, v in model.state_dict().items() if
+        #    #    ('.lm' not in k and '.visual_model' not in k)
+        #    #}
+        #    #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
+        #    utils.save_checkpoint({
+        #        'epoch': epoch + 1,
+        #        #'state_dict': stripped_state_dict,
+        #        'best_acc1': best_acc1,
+        #        #'optimizer' : optimizer.state_dict(),
+        #        #'scheduler' : scheduler.state_dict()
+        #    }, is_best, os.path.join(log_dir, 'ckpt'))
 
 
 def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run):
@@ -458,7 +468,7 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
     model.train()
     end = time.time()
     for i, batch in enumerate(train_loader):
-        actual_step = epoch * args.steps_per_epoch + i + 1
+        actual_step = (epoch * args.steps_per_epoch + i + 1 ) * args.per_device_train_batch_size * world_size
         data_time.update(time.time() - end)
         batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
         forward_start = time.time()
@@ -517,7 +527,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
-    actual_step = (epoch + 1) * args.steps_per_epoch
+    actual_step = (epoch + 1) * args.steps_per_epoch * args.per_device_train_batch_size * world_size
 
     batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
     losses = utils.AverageMeter('Loss', ':.4e', utils.Summary.AVERAGE)
@@ -619,6 +629,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
 
     if gpu % world_size == 0:
         progress.display_summary()
+        print(bleu1.avg, bleu2.avg, bleu3.avg, bleu4.avg)
 
         run.log({"val/total_secs_per_batch": batch_time.avg}, step=actual_step)
         run.log({"val/loss": losses.avg}, step=actual_step)
