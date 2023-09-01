@@ -208,7 +208,7 @@ class Arguments:
         default="openai/clip-vit-base-patch16", metadata={"help": "visual model to encode neighbor images"}
     )
     n_visual_tokens: int = field(
-        default=3, metadata={"help": "visual model to encode neighbor images"}
+        default=4, metadata={"help": "visual model to encode neighbor images"}
     )
     freeze_lm: Optional[bool] = field(
         default=False, metadata={"help": "evaluate model on validation set."}
@@ -470,9 +470,20 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
     model.train()
     end = time.time()
-    for i, batch in enumerate(train_loader):
+    # DEBUGGING: take the same batch repeatedly
+    for i, batch_cpu in enumerate(train_loader):
         data_time.update(time.time() - end)
-        batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
+
+        batch = {}
+        for k, v in batch_cpu.items():
+            if type(v) == list:
+                v_gpu = []
+                for v_i in v:
+                    v_gpu.append(v_i.cuda(gpu, non_blocking=True))
+                batch[k] = v_gpu
+            else:
+                batch[k] = v.cuda(gpu, non_blocking=True)
+
         forward_start = time.time()
         outputs = model(**batch)
         forward_time.update(time.time() - forward_start)

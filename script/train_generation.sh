@@ -20,7 +20,7 @@ MODEL_NAME='t5-base'
 #MODEL_NAME='google/long-t5-local-base'
 #MODEL_NAME='facebook/opt-350m'
 TASK='section'
-CONTEXT='text_only'
+CONTEXT='section_all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \

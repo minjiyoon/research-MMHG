@@ -11,6 +11,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow.compat.v1 as tf
 from collections import defaultdict
 
+import requests
 
 def convert_tf_to_scipy(tf_sparse_tensor):
     array = tf.sparse.to_dense(tf_sparse_tensor).numpy()
@@ -304,10 +305,39 @@ class DataParser():
         with open(f'{self.path}/wikiweb2m.pkl', 'wb') as file:
             pickle.dump(numpy_list, file)
 
+    def download_images(self):
+        for page_id, d in enumerate(self.dataset):
+            if page_id < 298000:
+                continue
+            if page_id == 331000:
+                break
+            if page_id % 1000 == 0:
+                print(page_id, 'have processed...')
+            image_urls = tf.sparse.to_dense(d[1]['section_image_url']).numpy()
+            for section_id in range(image_urls.shape[0]):
+                for image_id in range(image_urls[section_id].shape[0]):
+                    image_url = image_urls[section_id][image_id]
+                    if image_url == b'':
+                        continue
+                    image_url = image_url.decode()
+                    file_format = os.path.splitext(image_url)[1][1:]
+                    if os.path.exists(f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}'):
+                        continue
+                    try:
+                        response = requests.get(image_url, stream=True)
+                    except:
+                        time.sleep(1)
+                        response = requests.get(image_url, stream=True)
+
+                    with open(f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}', 'wb') as file:
+                        for chunk in response.iter_content(8192):
+                            file.write(chunk)
+
 
 if __name__ == "__main__":
     parser = DataParser()
     #parser.convert_to_numpy()
     #parser.split_preprocess()
-    parser.split_ids('section')
+    #parser.split_ids('section')
     #parser.save_df_torch()
+    parser.download_images()
