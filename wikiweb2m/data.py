@@ -152,6 +152,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         labels = ' '.join(labels.replace('\n', '').split())
         labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
         labels_with_ignore_index = [label if label != 0 else -100 for label in labels[0]]
+        labels_with_ignore_index.append(self.tokenizer.eos_token_id)
 
         input_ids = model_inputs.input_ids[0]
         attention_mask = model_inputs.attention_mask[0]

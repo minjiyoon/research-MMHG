@@ -15,7 +15,7 @@ ulimit -c unlimited
 #export WANDB_WATCH='gradients'
 export PYTHONPATH=.
 
-MODEL_NAME='t5-small'
+MODEL_NAME='t5-base'
 #MODEL_NAME='google/flan-t5-base'
 #MODEL_NAME='google/long-t5-local-base'
 #MODEL_NAME='facebook/opt-350m'
@@ -40,4 +40,4 @@ python language_modelling/run_generation.py \
     --grad_accumulation_steps 16 \
     --fp16 \
     --wandb_project MMHG \
-    --wandb_run ${DESCRIPTION}
+    --wandb_run ${DESCRIPTION}-Adafactor

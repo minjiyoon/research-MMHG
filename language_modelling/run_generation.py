@@ -55,6 +55,7 @@ from transformers import (
     set_seed,
     get_scheduler,
 )
+from transformers.optimization import Adafactor
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
@@ -310,15 +311,18 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().cuda(gpu)
-    optimizer_cls = torch.optim.AdamW
-    print('Using torch.optim.AdamW as the optimizer.')
-    optimizer = optimizer_cls(model.parameters(), args.learning_rate,
-            betas=(args.adam_beta1, args.adam_beta2),
-            weight_decay=args.weight_decay, eps=1e-8)
+    #print('Using torch.optim.AdamW as the optimizer.')
+    #optimizer_cls = torch.optim.AdamW
+    #optimizer = optimizer_cls(model.parameters(), args.learning_rate,
+    #        betas=(args.adam_beta1, args.adam_beta2),
+    #        weight_decay=args.weight_decay, eps=1e-8)
+    print('Using Adafactor as the optimizer.')
+    optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=1e-3)
 
     """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
-    scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
-    scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
+    #scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
+    #scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
+    scheduler = None
 
     # Detecting last checkpoint.
     if args.resume:
@@ -332,7 +336,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
             best_acc1 = best_acc1.cuda(gpu)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
-            scheduler.load_state_dict(checkpoint['scheduler'])
+            #scheduler.load_state_dict(checkpoint['scheduler'])
             print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
@@ -478,10 +482,10 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
         # Update weights
         if ((i + 1) % args.grad_accumulation_steps == 0) or (i == args.steps_per_epoch - 1):
-            if args.grad_clip > 2:
-                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            #if args.grad_clip > 2:
+            #    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
-            scheduler.step()
+            #scheduler.step()
             optimizer.zero_grad()
 
             actual_step = (epoch * args.steps_per_epoch + i + 1) // args.grad_accumulation_steps
@@ -494,8 +498,8 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
                 if gpu % world_size == 0:
                     progress.display(i + 1)
-                    curr_lr = scheduler.get_last_lr()
-                    run.log({"train/lr": curr_lr[0]}, step=actual_step)
+                    #curr_lr = scheduler.get_last_lr()
+                    #run.log({"train/lr": curr_lr[0]}, step=actual_step)
                     run.log({"train/loss": losses.avg}, step=actual_step)
                     run.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
                     run.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
