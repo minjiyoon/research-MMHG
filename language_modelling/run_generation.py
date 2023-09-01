@@ -311,13 +311,12 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().cuda(gpu)
-    #print('Using torch.optim.AdamW as the optimizer.')
     #optimizer_cls = torch.optim.AdamW
     #optimizer = optimizer_cls(model.parameters(), args.learning_rate,
     #        betas=(args.adam_beta1, args.adam_beta2),
     #        weight_decay=args.weight_decay, eps=1e-8)
     print('Using Adafactor as the optimizer.')
-    optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=1e-3)
+    optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=args.learning_rate)
 
     """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
     #scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
@@ -434,10 +433,13 @@ def main_worker(gpu, world_size, args, log_dir, run):
         train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run)
         # evaluate on validation set
         acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run)
+
+        if (epoch + 1) % 5 == 0:
+            evaluate_loop(test_loader, model, tokenizer, criterion, epoch, args, run, "test")
+
         # remember best acc@1 and save checkpoint
         #is_best = acc1 > best_acc1
         #best_acc1 = max(acc1, best_acc1)
-
         #if (epoch % args.save_epoch == 0 or is_best) and gpu % world_size == 0:
         #    # Only save non-frozen parameters.
         #    #stripped_state_dict = {
@@ -520,7 +522,7 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
 
 # Evaluate loop
-def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, prefix="Val"):
+def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, prefix="val"):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
@@ -546,21 +548,23 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         all_gt_captions = []
         max_to_display = 5
 
-        for i, batch in tqdm.tqdm(enumerate(val_loader), position=0, total=args.val_steps_per_epoch):
+        for i, batch in enumerate(val_loader):
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
             logits = outputs.logits
+            losses.update(loss.item(), logits.size(0))
 
             #acc1, acc5 = utils.accuracy(logits[:, :-1, :], full_labels[:, 1:], -100, topk=(1, 5))
             #top1.update(acc1[0], logits.size(0))
             #top5.update(acc5[0], logits.size(0))
-            losses.update(loss.item(), logits.size(0))
 
-            #generated_ids = model.module.generate(input_ids=batch["input_ids"],\
-            #                                attention_mask=batch["attention_mask"],\
-            #                                max_new_tokens=32)
-            generated_ids = torch.argmax(logits, dim=-1)
+            if prefix == "test":
+                generated_ids = model.module.generate(input_ids=batch["input_ids"],\
+                                                attention_mask=batch["attention_mask"],\
+                                                max_new_tokens=32)
+            else:
+                generated_ids = torch.argmax(logits, dim=-1)
 
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
@@ -574,16 +578,16 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             all_tgt_tokens = torch.cat(all_tgt_tokens)
 
             all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
-            all_generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            all_gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
+            generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
 
-            #for cap_i in range(len(generated_captions)):
-            #    stop_idx = generated_captions[cap_i].find('.')
-            #    if stop_idx > 5:
-            #        all_generated_captions.append(generated_captions[cap_i][:stop_idx])
-            #    else:
-            #        all_generated_captions.append(generated_captions[cap_i])
-            #    all_gt_captions.append([gt_captions[cap_i]])
+            for cap_i in range(len(generated_captions)):
+                stop_idx = generated_captions[cap_i].find('.')
+                if stop_idx > 5:
+                    all_generated_captions.append(generated_captions[cap_i][:stop_idx])
+                else:
+                    all_generated_captions.append(generated_captions[cap_i])
+                all_gt_captions.append([gt_captions[cap_i]])
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -628,12 +632,12 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         progress.display_summary()
         print(bleu1.avg, bleu2.avg, bleu3.avg, bleu4.avg)
 
-        run.log({"val/total_secs_per_batch": batch_time.avg}, step=actual_step)
-        run.log({"val/loss": losses.avg}, step=actual_step)
-        run.log({"val/bleu1": bleu1.avg}, step=actual_step)
-        run.log({"val/bleu2": bleu2.avg}, step=actual_step)
-        run.log({"val/bleu3": bleu3.avg}, step=actual_step)
-        run.log({"val/bleu4": bleu4.avg}, step=actual_step)
+        run.log({"{prefix}/total_secs_per_batch": batch_time.avg}, step=actual_step)
+        run.log({"{prefix}/loss": losses.avg}, step=actual_step)
+        run.log({"{prefix}/bleu1": bleu1.avg}, step=actual_step)
+        run.log({"{prefix}/bleu2": bleu2.avg}, step=actual_step)
+        run.log({"{prefix}/bleu3": bleu3.avg}, step=actual_step)
+        run.log({"{prefix}/bleu4": bleu4.avg}, step=actual_step)
 
     return bleu4.avg
     #rouge = evaluate.load("rouge")
