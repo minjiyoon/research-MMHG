@@ -632,12 +632,12 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         progress.display_summary()
         print(bleu1.avg, bleu2.avg, bleu3.avg, bleu4.avg)
 
-        run.log({"{prefix}/total_secs_per_batch": batch_time.avg}, step=actual_step)
-        run.log({"{prefix}/loss": losses.avg}, step=actual_step)
-        run.log({"{prefix}/bleu1": bleu1.avg}, step=actual_step)
-        run.log({"{prefix}/bleu2": bleu2.avg}, step=actual_step)
-        run.log({"{prefix}/bleu3": bleu3.avg}, step=actual_step)
-        run.log({"{prefix}/bleu4": bleu4.avg}, step=actual_step)
+        run.log({f"{prefix}/total_secs_per_batch": batch_time.avg}, step=actual_step)
+        run.log({f"{prefix}/loss": losses.avg}, step=actual_step)
+        run.log({f"{prefix}/bleu1": bleu1.avg}, step=actual_step)
+        run.log({f"{prefix}/bleu2": bleu2.avg}, step=actual_step)
+        run.log({f"{prefix}/bleu3": bleu3.avg}, step=actual_step)
+        run.log({f"{prefix}/bleu4": bleu4.avg}, step=actual_step)
 
     return bleu4.avg
     #rouge = evaluate.load("rouge")
