@@ -188,16 +188,13 @@ class Arguments:
         default=1.0, metadata={"help": "gradient clipping amount."}
     )
     lr_warmup_steps: Optional[int] = field(
-        default=2000, metadata={"help": "Number of steps to warm up lr."}
+        default=10, metadata={"help": "Number of steps to warm up lr."}
     )
     lr_schedule_step_size: Optional[int] = field(
         default=5, metadata={"help": "Number of steps before decaying lr."}
     )
     lr_schedule_gamma: Optional[float] = field(
         default=0.1, metadata={"help": "Decay parameter for learning rate scheduler."}
-    )
-    lr_warmup_steps: Optional[int] = field(
-        default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
 
     model_name_or_path: str = field(
@@ -468,7 +465,6 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
     model.train()
     end = time.time()
     for i, batch in enumerate(train_loader):
-        actual_step = (epoch * args.steps_per_epoch + i + 1 ) * args.per_device_train_batch_size * world_size
         data_time.update(time.time() - end)
         batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
         forward_start = time.time()
@@ -476,50 +472,47 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
         forward_time.update(time.time() - forward_start)
 
         loss = outputs.loss
-        loss = loss / args.grad_accumulation_steps
         losses.update(loss.item(), batch["input_ids"].size(0))
+        loss = loss / args.grad_accumulation_steps
         loss.backward()
 
         # Update weights
         if ((i + 1) % args.grad_accumulation_steps == 0) or (i == args.steps_per_epoch - 1):
-            if args.grad_clip > 0:
+            if args.grad_clip > 2:
                 nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
+
+            actual_step = (epoch * args.steps_per_epoch + i + 1) // args.grad_accumulation_steps
+            if actual_step == 1 or actual_step % args.print_freq == 0:
+                losses.all_reduce()
+                batch_time.all_reduce()
+                data_time.all_reduce()
+                forward_time.all_reduce()
+                ex_per_sec = (args.per_device_train_batch_size / batch_time.avg) * ngpus_per_node
+
+                if gpu % world_size == 0:
+                    progress.display(i + 1)
+                    curr_lr = scheduler.get_last_lr()
+                    run.log({"train/lr": curr_lr[0]}, step=actual_step)
+                    run.log({"train/loss": losses.avg}, step=actual_step)
+                    run.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
+                    run.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
+                    run.log({"metrics/total_secs_captioning": forward_time.avg}, step=actual_step)
+                    run.log({"metrics/examples_per_sec": ex_per_sec}, step=actual_step)
+
+                losses.reset()
+                batch_time.reset()
+                data_time.reset()
+                forward_time.reset()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-        if actual_step == 1 or (i + 1) % args.print_freq == 0:
-            losses.all_reduce()
-            batch_time.all_reduce()
-            data_time.all_reduce()
-            forward_time.all_reduce()
-            ex_per_sec = (args.per_device_train_batch_size / batch_time.avg) * ngpus_per_node
-
-            if gpu % world_size == 0:
-                progress.display(i + 1)
-
-            if gpu % world_size == 0:
-                run.log({"train/loss": losses.avg}, step=actual_step)
-                run.log({"metrics/total_secs_per_batch": batch_time.avg}, step=actual_step)
-                run.log({"metrics/data_secs_per_batch": data_time.avg}, step=actual_step)
-                run.log({"metrics/total_secs_captioning": forward_time.avg}, step=actual_step)
-                run.log({"metrics/examples_per_sec": ex_per_sec}, step=actual_step)
-
-            losses.reset()
-            batch_time.reset()
-            data_time.reset()
-            forward_time.reset()
 
         if i == args.steps_per_epoch - 1:
             break
-
-        scheduler.step()
-        curr_lr = scheduler.get_last_lr()
-        if actual_step == 1 or (i + 1) % args.print_freq == 0:
-            if gpu % world_size == 0:
-                run.log({"train/lr": curr_lr[0]}, step=actual_step)
 
 
 # Evaluate loop
@@ -527,7 +520,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
-    actual_step = (epoch + 1) * args.steps_per_epoch * args.per_device_train_batch_size * world_size
+    actual_step = ((epoch + 1) * args.steps_per_epoch) // args.grad_accumulation_steps
 
     batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
     losses = utils.AverageMeter('Loss', ':.4e', utils.Summary.AVERAGE)
@@ -549,7 +542,7 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
         all_gt_captions = []
         max_to_display = 5
 
-        for i, batch in tqdm.tqdm(enumerate(val_loader), position=0, total=len(val_loader)):
+        for i, batch in tqdm.tqdm(enumerate(val_loader), position=0, total=args.val_steps_per_epoch):
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
@@ -577,16 +570,16 @@ def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, pre
             all_tgt_tokens = torch.cat(all_tgt_tokens)
 
             all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
-            generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
+            all_generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            all_gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
 
-            for cap_i in range(len(generated_captions)):
-                stop_idx = generated_captions[cap_i].find('.')
-                if stop_idx > 5:
-                    all_generated_captions.append(generated_captions[cap_i][:stop_idx])
-                else:
-                    all_generated_captions.append(generated_captions[cap_i])
-                all_gt_captions.append([gt_captions[cap_i]])
+            #for cap_i in range(len(generated_captions)):
+            #    stop_idx = generated_captions[cap_i].find('.')
+            #    if stop_idx > 5:
+            #        all_generated_captions.append(generated_captions[cap_i][:stop_idx])
+            #    else:
+            #        all_generated_captions.append(generated_captions[cap_i])
+            #    all_gt_captions.append([gt_captions[cap_i]])
 
             # measure elapsed time
             batch_time.update(time.time() - end)
