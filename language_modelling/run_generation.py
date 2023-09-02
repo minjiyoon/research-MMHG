@@ -437,9 +437,6 @@ def main_worker(gpu, world_size, args, log_dir, run):
         # evaluate on validation set
         acc1 = evaluate_loop(val_loader, model, tokenizer, epoch, args, run)
 
-        #if (epoch + 1) % 5 == 0:
-        #    evaluate_loop(test_loader, model, tokenizer, epoch, args, run, "test")
-
         # remember best acc@1 and save checkpoint
         #is_best = acc1 > best_acc1
         #best_acc1 = max(acc1, best_acc1)
