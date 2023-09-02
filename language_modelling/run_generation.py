@@ -51,6 +51,7 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     HfArgumentParser,
     set_seed,
     get_scheduler,
@@ -264,6 +265,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
 
     # Prepare pretrained model
+    decoder_only = False
     if args.context in ("section_all", "all"):
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = T5Image(args, tokenizer)
@@ -272,6 +274,8 @@ def main_worker(gpu, world_size, args, log_dir, run):
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
     elif "opt" in args.model_name_or_path:
+        decoder_only = True
+        config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
     else:
@@ -309,19 +313,18 @@ def main_worker(gpu, world_size, args, log_dir, run):
     model.cuda(gpu)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=False)
 
-    # define loss function (criterion), optimizer, and learning rate scheduler
-    criterion = nn.CrossEntropyLoss().cuda(gpu)
-    #optimizer_cls = torch.optim.AdamW
-    #optimizer = optimizer_cls(model.parameters(), args.learning_rate,
-    #        betas=(args.adam_beta1, args.adam_beta2),
-    #        weight_decay=args.weight_decay, eps=1e-8)
-    print('Using Adafactor as the optimizer.')
-    optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=args.learning_rate)
-
-    """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
-    #scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
-    #scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
-    scheduler = None
+    if "t5" in args.model_name_or_path:
+        print('Using Adafactor as the optimizer.')
+        optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=args.learning_rate)
+        scheduler = None
+    elif "opt" in args.model_name_or_path:
+        optimizer_cls = torch.optim.AdamW
+        optimizer = optimizer_cls(model.parameters(), args.learning_rate,
+                betas=(args.adam_beta1, args.adam_beta2),
+                weight_decay=args.weight_decay, eps=1e-8)
+        """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
+        scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
+        scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
 
     # Detecting last checkpoint.
     if args.resume:
@@ -347,9 +350,9 @@ def main_worker(gpu, world_size, args, log_dir, run):
     train_data, val_data, test_data, id_list = load_wikiweb2m(args.task)
     print(f'Loading wikiweb2m done: {perf_counter()-start_time}')
     start_time = perf_counter()
-    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model)
-    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model)
-    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model)
+    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model, decoder_only)
+    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model, decoder_only)
+    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model, decoder_only)
     print(f'Initialize datasets: {perf_counter()-start_time}')
     print(f'Training with {len(train_dataset)} examples, validating with {len(val_dataset)} examples, testing with {len(test_dataset)} examples.')
 
@@ -421,21 +424,21 @@ def main_worker(gpu, world_size, args, log_dir, run):
     #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     if args.test:
-        evaluate_loop(test_loader, model, tokenizer, criterion, epoch, args, run)
+        evaluate_loop(test_loader, model, tokenizer, epoch, args, run)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
         #if epoch == 0:
-        #    evaluate_loop(val_loader, model, tokenizer, criterion, epoch-1, args, run)
+        #    evaluate_loop(val_loader, model, tokenizer, epoch-1, args, run)
 
         train_sampler.set_epoch(epoch)
         # train for one epoch
-        train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run)
+        train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run)
         # evaluate on validation set
-        acc1 = evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run)
+        acc1 = evaluate_loop(val_loader, model, tokenizer, epoch, args, run)
 
-        if (epoch + 1) % 5 == 0:
-            evaluate_loop(test_loader, model, tokenizer, criterion, epoch, args, run, "test")
+        #if (epoch + 1) % 5 == 0:
+        #    evaluate_loop(test_loader, model, tokenizer, epoch, args, run, "test")
 
         # remember best acc@1 and save checkpoint
         #is_best = acc1 > best_acc1
@@ -456,7 +459,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
         #    }, is_best, os.path.join(log_dir, 'ckpt'))
 
 
-def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, scheduler, args, run):
+def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
 
@@ -470,20 +473,9 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
     model.train()
     end = time.time()
-    # DEBUGGING: take the same batch repeatedly
-    for i, batch_cpu in enumerate(train_loader):
+    for i, batch in enumerate(train_loader):
         data_time.update(time.time() - end)
-
-        batch = {}
-        for k, v in batch_cpu.items():
-            if type(v) == list:
-                v_gpu = []
-                for v_i in v:
-                    v_gpu.append(v_i.cuda(gpu, non_blocking=True))
-                batch[k] = v_gpu
-            else:
-                batch[k] = v.cuda(gpu, non_blocking=True)
-
+        batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
         forward_start = time.time()
         outputs = model(**batch)
         forward_time.update(time.time() - forward_start)
@@ -533,7 +525,7 @@ def train_loop(train_loader, model, tokenizer, criterion, optimizer, epoch, sche
 
 
 # Evaluate loop
-def evaluate_loop(val_loader, model, tokenizer, criterion, epoch, args, run, prefix="val"):
+def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]

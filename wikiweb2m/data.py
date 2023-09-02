@@ -31,10 +31,11 @@ def load_wikiweb2m(task):
 
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None):
+    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None, decoder_only=False):
         self.path = './wikiweb2m/raw/'
         self.task = args.task
         self.context = args.context
+        self.decoder_only = decoder_only
 
         self.df = df
         self.id_list = id_list
@@ -194,6 +195,11 @@ class WikiWeb2M(torch.utils.data.Dataset):
         input_ids = model_inputs.input_ids[0]
         attention_mask = model_inputs.attention_mask[0]
         labels = torch.LongTensor(labels_with_ignore_index)
+
+        # OPT
+        if self.decoder_only:
+            label_prefix = ""
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         if self.context in ("section_all", "all"):
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "image_ranges": image_range}
