@@ -568,13 +568,13 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
 
             outputs = model(**batch)
+            logits = outputs.logits
             if args.decoder_only:
                 # only consider loss on reference summary just like seq2seq models
                 logits = logits[..., args.max_input_length:-1, :].contiguous()
                 labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
                 loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             else:
-                logits = outputs.logits
                 labels = batch['labels']
                 loss = outputs.loss
             losses.update(loss.item(), batch["input_ids"].size(0))
