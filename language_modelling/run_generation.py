@@ -489,8 +489,11 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
             # only consider loss on reference summary just like seq2seq models
             shift_logits = logits[..., args.max_input_length:-1, :].contiguous()
             shift_labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
-            summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            losses.update(summary_loss.item(), batch["input_ids"].size(0))
+            # summary_loss
+            #summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            #losses.update(summary_loss.item(), batch["input_ids"].size(0))
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            losses.update(loss.item(), batch["input_ids"].size(0))
         else:
             losses.update(loss.item(), batch["input_ids"].size(0))
         loss = loss / args.grad_accumulation_steps
@@ -573,7 +576,7 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
                 # only consider loss on reference summary just like seq2seq models
                 logits = logits[..., args.max_input_length:-1, :].contiguous()
                 labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
-                loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
             else:
                 labels = batch['labels']
                 loss = outputs.loss
