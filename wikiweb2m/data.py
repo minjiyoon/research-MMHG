@@ -67,11 +67,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
         section_summary = d['section_summary'][section_id].decode()
         section_rest_sentence = d['section_rest_sentence'][section_id].decode()
         if remove_summary:
-            #return ", ".join([section_title, section_depth, section_heading, section_parent_index, section_rest_sentence]), section_summary
-            return ", ".join([section_rest_sentence]), section_summary
+            section_info = ", ".join([section_rest_sentence])
+            section_info, section_summary = ' '.join(section_info.replace('\n', '').split()), ' '.join(section_summary.replace('\n', '').split())
+            return section_info, section_summary
         else:
-            #return ", ".join([section_title, section_depth, section_heading, section_parent_index, section_summary, section_rest_sentence])
-            return ", ".join([section_summary, section_rest_sentence])
+            section_info = ", ".join([section_summary, section_rest_sentence])
+            section_info = ' '.join(section_info.replace('\n', '').split())
+            return section_info
 
     def get_section_images(self, page_id, section_id, d):
         section_images = []
@@ -116,7 +118,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
                 inputs = "summarize: " + section_info
                 inputs = ' '.join(inputs.replace('\n', '').split())
-                model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
 
             elif self.context == "section_all":
                 section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
@@ -132,7 +134,6 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 else:
                     # wikiweb2m image padding size
                     images = [torch.zeros((3,  224, 224))]
-                model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
 
             elif self.context == "text_only":
                 page_info = self.get_page_info(d)
@@ -145,7 +146,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 context_info = ', '.join(context_info)
                 inputs = "summarize: " + section_info + ", context: " + page_info + context_info
                 inputs = ' '.join(inputs.replace('\n', '').split())
-                model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
 
             elif self.context == "all":
                 page_info = self.get_page_info(d)
@@ -184,41 +185,32 @@ class WikiWeb2M(torch.utils.data.Dataset):
                         images.extend([torch.zeros((3 * 224 * 224))])
                 if len(input_ids) > self.max_input_length:
                     input_ids = input_ids[:self.max_input_length]
-                model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
 
-        # Tokenize
+        # OPT
+        if self.decoder_only:
+            labels = "summary: " + labels
+            labels = ' '.join(labels.replace('\n', '').split())
+            label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            sep_id = input_ids.shape[0]
+            input_ids = torch.cat([input_ids, label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
+            model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length + self.max_output_length, padding="max_length", return_tensors="pt")
+            return {"input_ids": model_inputs.input_ids[0], "attention_mask": model_inputs.attention_mask[0], "labels": model_inputs.input_ids[0],"sep_id": sep_id}
+
+        # Padding
+        model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
+
         labels = ' '.join(labels.replace('\n', '').split())
-        labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
-        labels_with_ignore_index = [label if label != 0 else -100 for label in labels[0]]
-        labels_with_ignore_index.append(self.tokenizer.eos_token_id)
+        label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+        labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt").input_ids[0]
+        labels_with_ignore_index = [label if label != 0 else -100 for label in labels]
 
         input_ids = model_inputs.input_ids[0]
         attention_mask = model_inputs.attention_mask[0]
         labels = torch.LongTensor(labels_with_ignore_index)
-
-        # OPT
-        if self.decoder_only:
-            label_prefix = ""
-            return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         if self.context in ("section_all", "all"):
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "image_ranges": image_range}
         else:
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
-    @torch.no_grad()
-    def collate(self, items):
-        (inputs, labels) = zip(*[(item["inputs"], item["labels"]) for item in items])
-        model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids
-
-        labels_with_ignore_index = []
-        for example in labels:
-            labels_with_ignore_index.append([label if label != 0 else -100 for label in example])
-
-        return {
-                "input_ids": torch.LongTensor(model_inputs.input_ids),
-                "attention_mask": torch.LongTensor(model_inputs.attention_mask),
-                "labels": torch.LongTensor(labels_with_ignore_index)
-                }
 

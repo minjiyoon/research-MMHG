@@ -172,7 +172,7 @@ class Arguments:
 
 
     learning_rate: Optional[float] = field(
-        default=0.0001, metadata={"help": "initial learning rate."}
+        default=0.001, metadata={"help": "initial learning rate."}
     )
     adam_beta1: Optional[float] = field(
         default=0.9, metadata={"help": "beta1 for Adam."}
@@ -190,7 +190,7 @@ class Arguments:
         default=1.0, metadata={"help": "gradient clipping amount."}
     )
     lr_warmup_steps: Optional[int] = field(
-        default=10, metadata={"help": "Number of steps to warm up lr."}
+        default=2000, metadata={"help": "Number of steps to warm up lr."}
     )
     lr_schedule_step_size: Optional[int] = field(
         default=5, metadata={"help": "Number of steps before decaying lr."}
@@ -323,7 +323,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
                 betas=(args.adam_beta1, args.adam_beta2),
                 weight_decay=args.weight_decay, eps=1e-8)
         """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
-        scheduler_steplr = StepLR(optimizer, step_size=args.lr_schedule_step_size * args.steps_per_epoch, gamma=args.lr_schedule_gamma)
+        scheduler_steplr = StepLR(optimizer, step_size=(args.lr_schedule_step_size * args.steps_per_epoch) // args.grad_accumulation_steps, gamma=args.lr_schedule_gamma)
         scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
 
     # Detecting last checkpoint.
@@ -458,6 +458,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
         #        #'scheduler' : scheduler.state_dict()
         #    }, is_best, os.path.join(log_dir, 'ckpt'))
 
+    evaluate_loop(test_loader, model, tokenizer, args.epochs, args, run, "test")
 
 def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
@@ -471,26 +472,42 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
     if gpu % world_size == 0:
         progress = utils.ProgressMeter(args.steps_per_epoch, [batch_time, losses], prefix="Epoch: [{}]".format(epoch))
 
+    loss_fct = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+
     model.train()
     end = time.time()
     for i, batch in enumerate(train_loader):
         data_time.update(time.time() - end)
-        batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
+        #batch = {k: v.cuda(gpu, non_blocking=True)
+        new_batch = {}
+        for k, v in batch.items():
+            if k != "sep_id":
+                new_batch[k] = v.cuda(gpu, non_blocking=True)
         forward_start = time.time()
-        outputs = model(**batch)
+        outputs = model(**new_batch)
         forward_time.update(time.time() - forward_start)
 
         loss = outputs.loss
-        losses.update(loss.item(), batch["input_ids"].size(0))
+        if "sep_id" in batch.keys():
+            logits = outputs.logits
+            idx = batch['sep_id'].item() # index of separator token
+            # only consider loss on reference summary just like seq2seq models
+            shift_logits = logits[..., idx:-1, :].contiguous()
+            shift_labels = new_batch['labels'][..., idx+1:].contiguous()
+            summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            losses.update(summary_loss.item(), batch["input_ids"].size(0))
+        else:
+            losses.update(loss.item(), batch["input_ids"].size(0))
         loss = loss / args.grad_accumulation_steps
         loss.backward()
 
         # Update weights
         if ((i + 1) % args.grad_accumulation_steps == 0) or (i == args.steps_per_epoch - 1):
-            #if args.grad_clip > 2:
-            #    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
-            #scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
+                if args.grad_clip > 2:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.zero_grad()
 
             actual_step = (epoch * args.steps_per_epoch + i + 1) // args.grad_accumulation_steps
@@ -552,11 +569,25 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         max_to_display = 5
 
         for i, batch in enumerate(val_loader):
-            batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
-            outputs = model(**batch)
+            #batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
+            new_batch = {}
+            for k, v in batch.items():
+                if k != "sep_id":
+                    new_batch[k] = v.cuda(gpu, non_blocking=True)
+
+            outputs = model(**new_batch)
             loss = outputs.loss
             logits = outputs.logits
-            losses.update(loss.item(), logits.size(0))
+            if "sep_id" in batch.keys():
+                for i in range(batch['sep_id'].shape[0]):
+                    idx = batch['sep_id'][i].item() # index of separator token
+                    # only consider loss on reference summary just like seq2seq models
+                    shift_logits = logits[i][..., idx:-1, :].contiguous()
+                    shift_labels = new_batch[i]['labels'][..., idx+1:].contiguous()
+                    summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    losses.update(summary_loss.item(), 1)
+            else:
+                losses.update(loss.item(), batch["input_ids"].size(0))
 
             #acc1, acc5 = utils.accuracy(logits[:, :-1, :], full_labels[:, 1:], -100, topk=(1, 5))
             #top1.update(acc1[0], logits.size(0))
