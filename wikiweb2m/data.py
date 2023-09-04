@@ -31,11 +31,11 @@ def load_wikiweb2m(task):
 
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None, decoder_only=False):
+    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None):
         self.path = './wikiweb2m/raw/'
         self.task = args.task
         self.context = args.context
-        self.decoder_only = decoder_only
+        self.decoder_only = args.decoder_only
 
         self.df = df
         self.id_list = id_list
@@ -188,13 +188,17 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         # OPT
         if self.decoder_only:
-            labels = "summary: " + labels
+            model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
+            labels = ", summary: " + labels
             labels = ' '.join(labels.replace('\n', '').split())
             label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-            sep_id = input_ids.shape[0]
-            input_ids = torch.cat([input_ids, label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
-            model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length + self.max_output_length, padding="max_length", return_tensors="pt")
-            return {"input_ids": model_inputs.input_ids[0], "attention_mask": model_inputs.attention_mask[0], "labels": model_inputs.input_ids[0],"sep_id": sep_id}
+            label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
+            labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
+            return {
+                    "input_ids": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
+                    "attention_mask": torch.cat([model_inputs.attention_mask[0], labels.attention_mask[0]], dim=0),
+                    "labels": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0)
+                    }
 
         # Padding
         model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")

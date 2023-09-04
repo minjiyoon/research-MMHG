@@ -202,6 +202,9 @@ class Arguments:
     model_name_or_path: str = field(
         default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
+    decoder_only: Optional[bool] = field(
+        default=False, metadata={"help": "how to encode computation graphs"}
+    )
     text_model: str = field(
         default="t5-base", metadata={"help": "text model to encode neighbor texts"}
     )
@@ -265,7 +268,6 @@ def main_worker(gpu, world_size, args, log_dir, run):
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
 
     # Prepare pretrained model
-    decoder_only = False
     if args.context in ("section_all", "all"):
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = T5Image(args, tokenizer)
@@ -274,7 +276,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
     elif "opt" in args.model_name_or_path:
-        decoder_only = True
+        args.decoder_only = True
         config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
@@ -350,9 +352,9 @@ def main_worker(gpu, world_size, args, log_dir, run):
     train_data, val_data, test_data, id_list = load_wikiweb2m(args.task)
     print(f'Loading wikiweb2m done: {perf_counter()-start_time}')
     start_time = perf_counter()
-    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model, decoder_only)
-    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model, decoder_only)
-    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model, decoder_only)
+    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model)
+    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model)
+    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model)
     print(f'Initialize datasets: {perf_counter()-start_time}')
     print(f'Training with {len(train_dataset)} examples, validating with {len(val_dataset)} examples, testing with {len(test_dataset)} examples.')
 
@@ -469,28 +471,24 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
     if gpu % world_size == 0:
         progress = utils.ProgressMeter(args.steps_per_epoch, [batch_time, losses], prefix="Epoch: [{}]".format(epoch))
 
-    loss_fct = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+    if args.decoder_only:
+        loss_fct = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
     model.train()
     end = time.time()
     for i, batch in enumerate(train_loader):
         data_time.update(time.time() - end)
-        #batch = {k: v.cuda(gpu, non_blocking=True)
-        new_batch = {}
-        for k, v in batch.items():
-            if k != "sep_id":
-                new_batch[k] = v.cuda(gpu, non_blocking=True)
+        batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
         forward_start = time.time()
-        outputs = model(**new_batch)
+        outputs = model(**batch)
         forward_time.update(time.time() - forward_start)
 
         loss = outputs.loss
-        if "sep_id" in batch.keys():
+        if args.decoder_only:
             logits = outputs.logits
-            idx = batch['sep_id'].item() # index of separator token
             # only consider loss on reference summary just like seq2seq models
-            shift_logits = logits[..., idx:-1, :].contiguous()
-            shift_labels = new_batch['labels'][..., idx+1:].contiguous()
+            shift_logits = logits[..., args.max_input_length:-1, :].contiguous()
+            shift_labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
             summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             losses.update(summary_loss.item(), batch["input_ids"].size(0))
         else:
@@ -547,8 +545,6 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
 
     batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
     losses = utils.AverageMeter('Loss', ':.4e', utils.Summary.AVERAGE)
-    #top1 = utils.AverageMeter('Acc@1', ':6.2f', utils.Summary.AVERAGE)
-    #top5 = utils.AverageMeter('Acc@5', ':6.2f', utils.Summary.AVERAGE)
     bleu1 = utils.AverageMeter('BLEU@1', ':6.2f', utils.Summary.AVERAGE)
     bleu2 = utils.AverageMeter('BLEU@2', ':6.2f', utils.Summary.AVERAGE)
     bleu3 = utils.AverageMeter('BLEU@3', ':6.2f', utils.Summary.AVERAGE)
@@ -556,6 +552,9 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
 
     if gpu % world_size == 0:
         progress = utils.ProgressMeter(args.val_steps_per_epoch, [batch_time, losses], prefix=f'{prefix}: ')
+
+    if args.decoder_only:
+        loss_fct = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
     # switch to evaluate mode
     model.eval()
@@ -566,34 +565,26 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         max_to_display = 5
 
         for i, batch in enumerate(val_loader):
-            #batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
-            new_batch = {}
-            for k, v in batch.items():
-                if k != "sep_id":
-                    new_batch[k] = v.cuda(gpu, non_blocking=True)
+            batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
 
-            outputs = model(**new_batch)
-            loss = outputs.loss
-            logits = outputs.logits
-            if "sep_id" in batch.keys():
-                for i in range(batch['sep_id'].shape[0]):
-                    idx = batch['sep_id'][i].item() # index of separator token
-                    # only consider loss on reference summary just like seq2seq models
-                    shift_logits = logits[i][..., idx:-1, :].contiguous()
-                    shift_labels = new_batch[i]['labels'][..., idx+1:].contiguous()
-                    summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                    losses.update(summary_loss.item(), 1)
+            outputs = model(**batch)
+            if args.decoder_only:
+                # only consider loss on reference summary just like seq2seq models
+                logits = logits[..., args.max_input_length:-1, :].contiguous()
+                labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
+                loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             else:
-                losses.update(loss.item(), batch["input_ids"].size(0))
-
-            #acc1, acc5 = utils.accuracy(logits[:, :-1, :], full_labels[:, 1:], -100, topk=(1, 5))
-            #top1.update(acc1[0], logits.size(0))
-            #top5.update(acc5[0], logits.size(0))
+                logits = outputs.logits
+                labels = batch['labels']
+                loss = outputs.loss
+            losses.update(loss.item(), batch["input_ids"].size(0))
 
             if prefix == "test":
-                generated_ids = model.module.generate(input_ids=batch["input_ids"],\
-                                                attention_mask=batch["attention_mask"],\
-                                                max_new_tokens=32)
+                if args.decoder_only:
+                    generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=32)
+                else:
+                    generated_ids = model.module.generate(input_ids=batch["input_ids"][..., :args.max_input_length, :].contiguous(), \
+                                                    attention_mask=batch["attention_mask"][..., :args.max_input_length, :].contiguous(), max_new_tokens=32)
             else:
                 generated_ids = torch.argmax(logits, dim=-1)
 
@@ -602,7 +593,7 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
             all_generated_ids[dist.get_rank()] = generated_ids
             generated_ids = torch.cat(all_generated_ids)
 
-            tgt_tokens = batch["labels"]
+            tgt_tokens = labels
             all_tgt_tokens = [torch.zeros_like(tgt_tokens) for _ in range(dist.get_world_size())]
             dist.all_gather(all_tgt_tokens, tgt_tokens)
             all_tgt_tokens[dist.get_rank()] = tgt_tokens
@@ -648,9 +639,9 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         bleu2_score = bleu_scorers[1](all_generated_captions, all_gt_captions)
         bleu2.update(bleu2_score, 1)
         bleu3_score = bleu_scorers[2](all_generated_captions, all_gt_captions)
-        bleu3.update(bleu3_score, 2)
+        bleu3.update(bleu3_score, 1)
         bleu4_score = bleu_scorers[3](all_generated_captions, all_gt_captions)
-        bleu4.update(bleu4_score, 3)
+        bleu4.update(bleu4_score, 1)
 
     batch_time.all_reduce()
     losses.all_reduce()

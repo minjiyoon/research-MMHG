@@ -31,13 +31,13 @@ python language_modelling/run_generation.py \
     --max_input_length 512 \
     --max_output_length 128 \
     --epochs 20 \
-    --steps_per_epoch 10000 \
+    --steps_per_epoch 20000 \
     --val_steps_per_epoch 400 \
-    --learning_rate 5e-5 \
-    --per_device_train_batch_size 2 \
+    --learning_rate 1e-4 \
+    --per_device_train_batch_size 1 \
     --per_device_val_batch_size 4 \
     --dataloader_num_workers 4 \
-    --grad_accumulation_steps 16 \
+    --grad_accumulation_steps 32 \
     --fp16 \
     --wandb_project MMHG \
     --wandb_run ${DESCRIPTION}
