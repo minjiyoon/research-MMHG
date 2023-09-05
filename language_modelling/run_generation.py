@@ -614,7 +614,8 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
             all_tgt_tokens[dist.get_rank()] = tgt_tokens
             all_tgt_tokens = torch.cat(all_tgt_tokens)
 
-            all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
+            if not args.decoder_only:
+                all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
             generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
 
