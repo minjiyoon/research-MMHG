@@ -230,11 +230,11 @@ def main():
                 + f"position_type: {args.position_type} cannot be set together"
             )
 
-    i = 1
+    i = 0
     log_dir = os.path.join(args.log_dir, args.wandb_run)
     while os.path.exists(log_dir):
-        log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
         i += 1
+        log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
     os.makedirs(log_dir)
 
     combined_args = {**vars(args), **vars(args), **vars(args)}
@@ -242,7 +242,7 @@ def main():
         json.dump(combined_args, wf, indent=4)
 
     # Wandb logging
-    run = wandb.init(project=args.wandb_project, name=args.wandb_run)
+    run = wandb.init(project=args.wandb_project, name=f'{args.wandb_run}_{i}')
     run.config.update(combined_args)
 
     print(f'Logging to {log_dir}.')
@@ -330,18 +330,20 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     # Detecting last checkpoint.
     if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
+        checkpoint_path = os.path.join(args.log_dir, args.resume) + 'ckpt.pth.tar'
+        if os.path.isfile(checkpoint_path):
+            print("=> loading checkpoint '{}'".format(checkpoint_path))
             # Map model to be loaded to specified single gpu.
             loc = 'cuda:{}'.format(gpu)
-            checkpoint = torch.load(args.resume, map_location=loc)
+            checkpoint = torch.load(checkpoint_path, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
             best_acc1 = best_acc1.cuda(gpu)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
-            #scheduler.load_state_dict(checkpoint['scheduler'])
-            print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
+            if scheduler is not None:
+                scheduler.load_state_dict(checkpoint['scheduler'])
+            print("=> loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
@@ -440,23 +442,32 @@ def main_worker(gpu, world_size, args, log_dir, run):
         acc1 = evaluate_loop(val_loader, model, tokenizer, epoch, args, run)
 
         # remember best acc@1 and save checkpoint
-        #is_best = acc1 > best_acc1
-        #best_acc1 = max(acc1, best_acc1)
-        #if (epoch % args.save_epoch == 0 or is_best) and gpu % world_size == 0:
-        #    # Only save non-frozen parameters.
-        #    #stripped_state_dict = {
-        #    #    k: v for k, v in model.state_dict().items() if
-        #    #    ('.lm' not in k and '.visual_model' not in k)
-        #    #}
-        #    #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
-        #    utils.save_checkpoint({
-        #        'epoch': epoch + 1,
-        #        #'state_dict': stripped_state_dict,
-        #        'best_acc1': best_acc1,
-        #        #'optimizer' : optimizer.state_dict(),
-        #        #'scheduler' : scheduler.state_dict()
-        #    }, is_best, os.path.join(log_dir, 'ckpt'))
+        is_best = acc1 > best_acc1
+        best_acc1 = max(acc1, best_acc1)
 
+        if gpu % world_size == 0 and is_best:
+            # Only save non-frozen parameters.
+            #stripped_state_dict = {
+            #    k: v for k, v in model.state_dict().items() if
+            #    ('.lm' not in k and '.visual_model' not in k)
+            #}
+            #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
+            state = {
+                'epoch': args.epochs,
+                'best_acc1': acc1,
+                'state_dict': model.state_dict(),
+                'optimizer' : optimizer.state_dict(),
+            }
+            if scheduler is not None:
+                state['scheduler'] = scheduler.state_dict()
+            torch.save(state, os.path.join(log_dir, 'ckpt.pth.tar'))
+    # Test
+    checkpoint_path = os.path.join(log_dir, 'ckpt.pth.tar')
+    print("=> loading best val checkpoint '{}'".format(checkpoint_path))
+    # Map model to be loaded to specified single gpu.
+    loc = 'cuda:{}'.format(gpu)
+    checkpoint = torch.load(checkpoint_path, map_location=loc)
+    model.load_state_dict(checkpoint['state_dict'], strict=False)
     evaluate_loop(test_loader, model, tokenizer, args.epochs, args, run, "test")
 
 def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run):
