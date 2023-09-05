@@ -832,22 +832,7 @@ class MPTForCausalLM(MPTPreTrainedModel):
 
         Returns:
 
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, MPTForCausalLM
-
-        >>> model = MPTForCausalLM.from_pretrained("facebook/opt-350m")
-        >>> tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
-
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious. I'm just a little bit of a weirdo."
-        ```"""
+        """
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1000,26 +985,6 @@ class MPT(nn.Module):
         self.text_model.eval()
         self.visual_model.eval()
 
-    def forward(
-        self,
-        input_ids,
-        attention_mask,
-        labels,
-        images=None,
-        image_ranges=None,
-    ):
-        if images == None and image_ranges == None:
-            print('*** You didnt give images... ***')
-            return self.lm(input_ids, attention_mask, labels)
-
-        input_embs = self.input_embeddings(input_ids)
-        visual_embs = self.get_visual_embs(torch.cat(images, dim=0)).reshape(len(images), images[0].shape[0], self.args.n_visual_tokens, -1)
-        for i in range(input_embs.shape[0]):
-            for j in range(len(images)):
-                if image_ranges[j][0] == image_ranges[j][1]:
-                    continue
-                input_embs[i][image_ranges[j][0]:image_ranges[j][1]] = visual_embs[i][j]
-
-        output = self.lm(input_embeddings=input_embs,
-                        attention_mask=attention_mask,
-                        labels=labels)
+    def forward(self, input_ids, attention_mask, labels):
+        output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        return output

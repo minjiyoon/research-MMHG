@@ -123,6 +123,9 @@ class Arguments:
     log_dir: Optional[str] = field(
         default='log', metadata={"help": "logging dir"}
     )
+    save_dir: Optional[str] = field(
+        default=None, metadata={"help": "logging dir"}
+    )
     resume: Optional[str] = field(
         default=None, metadata={"help": "path to latest checkpoint (default: none)"}
     )
@@ -236,13 +239,14 @@ def main():
         i += 1
         log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
     os.makedirs(log_dir)
+    args.save_dir = os.path.join(log_dir, 'ckpt.pth.tar')
 
-    combined_args = {**vars(args), **vars(args), **vars(args)}
+    combined_args = {**vars(args)}
     with open(os.path.join(log_dir, f'args.json'), 'w') as wf:
         json.dump(combined_args, wf, indent=4)
 
     # Wandb logging
-    run = wandb.init(project=args.wandb_project, name=f'{args.wandb_run}_{i}')
+    run = wandb.init(project=args.wandb_project, name=args.wandb_run)
     run.config.update(combined_args)
 
     print(f'Logging to {log_dir}.')
@@ -459,10 +463,10 @@ def main_worker(gpu, world_size, args, log_dir, run):
             }
             if scheduler is not None:
                 state['scheduler'] = scheduler.state_dict()
-            print('=> save best val model ...', os.path.join(log_dir, 'ckpt.pth.tar'))
-            torch.save(state, os.path.join(log_dir, 'ckpt.pth.tar'))
+            print('=> save best val model ...', args.save_dir)
+            torch.save(state, args.save_dir)
     # Test
-    checkpoint_path = os.path.join(log_dir, 'ckpt.pth.tar')
+    checkpoint_path = args.save_dir
     print("=> loading best val checkpoint '{}'".format(checkpoint_path))
     # Map model to be loaded to specified single gpu.
     loc = 'cuda:{}'.format(gpu)
@@ -502,10 +506,8 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
             shift_logits = logits[..., args.max_input_length:-1, :].contiguous()
             shift_labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
             # summary_loss
-            #summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            #losses.update(summary_loss.item(), batch["input_ids"].size(0))
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            losses.update(loss.item(), batch["input_ids"].size(0))
+            summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            losses.update(summary_loss.item(), batch["input_ids"].size(0))
         else:
             losses.update(loss.item(), batch["input_ids"].size(0))
         loss = loss / args.grad_accumulation_steps
