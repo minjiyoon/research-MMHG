@@ -330,7 +330,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     # Detecting last checkpoint.
     if args.resume:
-        checkpoint_path = os.path.join(args.log_dir, args.resume) + 'ckpt.pth.tar'
+        checkpoint_path = os.path.join(args.log_dir, args.resume, 'ckpt.pth.tar')
         if os.path.isfile(checkpoint_path):
             print("=> loading checkpoint '{}'".format(checkpoint_path))
             # Map model to be loaded to specified single gpu.
@@ -338,14 +338,13 @@ def main_worker(gpu, world_size, args, log_dir, run):
             checkpoint = torch.load(checkpoint_path, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.cuda(gpu)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
             if scheduler is not None:
                 scheduler.load_state_dict(checkpoint['scheduler'])
-            print("=> loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
+            print("=> loaded checkpoint '{}' (epoch {}, best_acc {})".format(checkpoint_path, checkpoint['epoch'], checkpoint['best_acc1']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print("=> no checkpoint found at '{}'".format(checkpoint_path))
 
     cudnn.benchmark = True
 
@@ -445,7 +444,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if gpu % world_size == 0 and is_best:
+        if gpu % world_size == 0 and (is_best or epoch == 0):
             # Only save non-frozen parameters.
             #stripped_state_dict = {
             #    k: v for k, v in model.state_dict().items() if
@@ -460,6 +459,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
             }
             if scheduler is not None:
                 state['scheduler'] = scheduler.state_dict()
+            print('=> save best val model ...', os.path.join(log_dir, 'ckpt.pth.tar'))
             torch.save(state, os.path.join(log_dir, 'ckpt.pth.tar'))
     # Test
     checkpoint_path = os.path.join(log_dir, 'ckpt.pth.tar')
@@ -468,6 +468,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
     loc = 'cuda:{}'.format(gpu)
     checkpoint = torch.load(checkpoint_path, map_location=loc)
     model.load_state_dict(checkpoint['state_dict'], strict=False)
+    print("=> loaded best val checkpoint '{}'".format(checkpoint_path))
     evaluate_loop(test_loader, model, tokenizer, args.epochs, args, run, "test")
 
 def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run):
