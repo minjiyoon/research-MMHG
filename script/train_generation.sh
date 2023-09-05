@@ -15,10 +15,10 @@ ulimit -c unlimited
 #export WANDB_WATCH='gradients'
 export PYTHONPATH=.
 
-MODEL_NAME='t5-base'
+#MODEL_NAME='t5-base'
 #MODEL_NAME='google/flan-t5-base'
 #MODEL_NAME='google/long-t5-local-base'
-#MODEL_NAME='facebook/opt-350m'
+MODEL_NAME='facebook/opt-350m'
 TASK='section'
 CONTEXT='section_only'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
