@@ -21,7 +21,7 @@ export PYTHONPATH=.
 #MODEL_NAME='facebook/opt-350m'
 MODEL_NAME='facebook/mpt-125m'
 TASK='section'
-CONTEXT='section_only'
+CONTEXT='text_only'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
@@ -40,7 +40,7 @@ python language_modelling/run_generation.py \
     --val_steps_per_epoch 400 \
     --learning_rate 5e-5 \
     --per_device_train_batch_size 2 \
-    --per_device_val_batch_size 4 \
+    --per_device_val_batch_size 2 \
     --dataloader_num_workers 8 \
     --grad_accumulation_steps 16 \
     --fp16 \
