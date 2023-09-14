@@ -309,10 +309,12 @@ class DataParser():
             pickle.dump(numpy_list, file)
 
     def download_images(self):
+        headers = {"User-Agent": "research (https://www.cs.cmu.edu/; minjiy@cs.cmu.edu)"}
+
         for page_id, d in enumerate(self.dataset):
-            if page_id < 500000:
+            if page_id < 100000:
                 continue
-            if page_id == 600000:
+            if page_id == 200000:
                 break
             if page_id % 10000 == 0:
                 print(page_id, 'have processed...')
@@ -329,20 +331,29 @@ class DataParser():
                         continue
 
                     retry = True
-                    retried_num = 0
+                    another_image = False
+                    retried_num = 1
                     while retry:
                         if retried_num % 5 == 0:
-                            print(f'retried {retried_num} times for {file_name}')
+                            print(f'retried {retried_num} times for {image_url}: {file_name}')
                         if retried_num == 20:
                             break
                         try:
-                            response = requests.get(image_url, stream=True)
-                        except:
-                            time.sleep(1)
-                            response = requests.get(image_url, stream=True)
+                            response = requests.get(image_url, headers=headers)
+                            response.raise_for_status()
+                        except requests.exceptions.HTTPError as e:
+                            if "404 Client Error: Not Found for url" in str(e):
+                                retry = False
+                                another_image = True
+                                break
+                            else:
+                                time.sleep(1)
+                                response = requests.get(image_url)
+                                response.raise_for_status()
                         with open(file_name, 'wb') as file:
                             for chunk in response.iter_content(8192):
                                 file.write(chunk)
+
                         try:
                             img = Image.open(file_name)
                             retry = False
@@ -350,7 +361,7 @@ class DataParser():
                             time.sleep(1)
                             retry = True
                             retried_num += 1
-                    if retry == False:
+                    if retry == False and another_image == False:
                         break
 
 
@@ -358,6 +369,6 @@ if __name__ == "__main__":
     parser = DataParser()
     #parser.convert_to_numpy()
     #parser.split_preprocess()
-    parser.split_ids('section')
+    #parser.split_ids('section')
     #parser.save_df_torch()
-    #parser.download_images()
+    parser.download_images()
