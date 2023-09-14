@@ -1,10 +1,12 @@
 import json
+import time
 import glob
 import pickle
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
+from PIL import Image
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -308,11 +310,11 @@ class DataParser():
 
     def download_images(self):
         for page_id, d in enumerate(self.dataset):
-            if page_id < 298000:
+            if page_id < 500000:
                 continue
-            if page_id == 331000:
+            if page_id == 600000:
                 break
-            if page_id % 1000 == 0:
+            if page_id % 10000 == 0:
                 print(page_id, 'have processed...')
             image_urls = tf.sparse.to_dense(d[1]['section_image_url']).numpy()
             for section_id in range(image_urls.shape[0]):
@@ -322,17 +324,34 @@ class DataParser():
                         continue
                     image_url = image_url.decode()
                     file_format = os.path.splitext(image_url)[1][1:]
-                    if os.path.exists(f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}'):
+                    file_name = f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}'
+                    if os.path.exists(file_name):
                         continue
-                    try:
-                        response = requests.get(image_url, stream=True)
-                    except:
-                        time.sleep(1)
-                        response = requests.get(image_url, stream=True)
 
-                    with open(f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}', 'wb') as file:
-                        for chunk in response.iter_content(8192):
-                            file.write(chunk)
+                    retry = True
+                    retried_num = 0
+                    while retry:
+                        if retried_num % 5 == 0:
+                            print(f'retried {retried_num} times for {file_name}')
+                        if retried_num == 20:
+                            break
+                        try:
+                            response = requests.get(image_url, stream=True)
+                        except:
+                            time.sleep(1)
+                            response = requests.get(image_url, stream=True)
+                        with open(file_name, 'wb') as file:
+                            for chunk in response.iter_content(8192):
+                                file.write(chunk)
+                        try:
+                            img = Image.open(file_name)
+                            retry = False
+                        except:
+                            time.sleep(1)
+                            retry = True
+                            retried_num += 1
+                    if retry == False:
+                        break
 
 
 if __name__ == "__main__":

@@ -112,14 +112,6 @@ class WikiWeb2M(torch.utils.data.Dataset):
             break
         return ", ".join(section_captions), section_images
 
-    def get_image_info(self, section_id, image_id, d, remove_caption=True):
-        image_url =  tf.sparse.to_dense(d[1]['section_image_url'])[section_id][image_id].numpy().decode()
-        image_caption = tf.sparse.to_dense(d[1]['section_image_captions'])[section_id][image_id].numpy().decode()
-        if remove_caption:
-            return Image.open(urlopen(image_url))
-        else:
-            return Image.open(urlopen(image_url)), image_caption
-
     def __getitem__(self, index):
         if self.random_flag is False:
             if self.cross_attention:
