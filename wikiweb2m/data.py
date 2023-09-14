@@ -36,6 +36,12 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.task = args.task
         self.context = args.context
         self.decoder_only = args.decoder_only
+        self.cross_attention = args.cross_attention
+        self.random_flag = args.random_flag
+
+        self.max_texts = args.max_text_neighbors
+        self.max_images = args.max_image_neighbors
+        self.text_position_type = args.text_position_type
 
         self.df = df
         self.id_list = id_list
@@ -46,7 +52,6 @@ class WikiWeb2M(torch.utils.data.Dataset):
         if feature_extractor_model is not None and self.context in ('section_all', 'all'):
             self.feature_extractor = utils.get_feature_extractor_for_model(feature_extractor_model)
             self.n_visual_tokens = args.n_visual_tokens
-            self.max_images = 5
 
     def __len__(self):
         return len(self.id_list)
@@ -110,6 +115,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
             return Image.open(urlopen(image_url)), image_caption
 
     def __getitem__(self, index):
+        if self.random_flag is False:
+            if self.cross_attention:
+                return self.get_mmg_item(index)
+
         if self.task == "section":
             page_id, section_id = self.id_list[index]
             d = self.df[self.df['page_id'] == page_id].iloc[0]
@@ -216,5 +225,72 @@ class WikiWeb2M(torch.utils.data.Dataset):
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "image_ranges": image_range}
         else:
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+
+    def get_mmg_item(self, index):
+        page_id, section_id = self.id_list[index]
+        d = self.df[self.df['page_id'] == page_id].iloc[0]
+        images = None
+
+        # OPT input/label style
+        section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+        inputs = "summarize: " + section_info
+        inputs = ' '.join(inputs.replace('\n', '').split())
+        model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+
+        labels = ", summary: " + labels
+        labels = ' '.join(labels.replace('\n', '').split())
+        label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+        label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
+        labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
+
+        #Multimodal neighbor information
+        neighbor_text = []
+        position_ids = []
+
+        #(1) page information
+        page_info = self.get_page_info(d)
+        neighbor_text.append(page_info)
+        position_ids.append(len(position_ids))
+
+        #(2) neighbor section information
+        for context_id in range(len(d['section_title'])):
+            if context_id == section_id:
+                continue
+            if len(neighbor_text) == self.max_texts:
+                break
+            context_info = self.get_section_info(context_id, d, remove_summary=False)
+            neighbor_text.append(context_info)
+            if self.text_position_type == "sequence":
+                position_ids.append(len(position_ids))
+            elif self.text_position_type == "relative":
+                position_id = section_id - context_id
+                if position_id > 0:
+                    position_id = 2 * position_id - 1
+                else:
+                    position_id = -2 * position_id
+                if position_id > self.max_output_length - 1:
+                    position_id = self.max_output_length - 1
+                position_ids.append(position_id)
+
+        #Pad
+        position_ids = [position_id + 1 for position_id in position_ids]
+        while len(neighbor_text) < self.max_texts:
+            neighbor_text.append('')
+            position_ids.append(0)
+
+        #Tokenize
+        neighbor_text = self.tokenizer(neighbor_text, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+        result = {
+                "input_ids": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
+                "attention_mask": torch.cat([model_inputs.attention_mask[0], labels.attention_mask[0]], dim=0),
+                "labels": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
+                "neighbor_input_ids": neighbor_text.input_ids,
+                "neighbor_attention_mask": neighbor_text.attention_mask,
+                }
+        if self.text_position_type != "none":
+            result["neighbor_pos_ids"] = torch.LongTensor(position_ids)
+
+        return result
 
 

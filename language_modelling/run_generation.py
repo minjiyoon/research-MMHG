@@ -65,7 +65,7 @@ from wikiweb2m import load_wikiweb2m, WikiWeb2M
 from wikiweb2m.cider import Cider
 
 from language_modelling import utils
-from model import T5Image
+from model import T5Image, MPT
 #from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -206,10 +206,13 @@ class Arguments:
         default=None, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     decoder_only: Optional[bool] = field(
-        default=False, metadata={"help": "how to encode computation graphs"}
+        default=False, metadata={"help": "opt or mpt"}
+    )
+    cross_attention: Optional[bool] = field(
+        default=False, metadata={"help": "mlp"}
     )
     text_model: str = field(
-        default="t5-base", metadata={"help": "text model to encode neighbor texts"}
+        default="roberta-base", metadata={"help": "text model to encode neighbor texts"}
     )
     visual_model: str = field(
         default="openai/clip-vit-base-patch16", metadata={"help": "visual model to encode neighbor images"}
@@ -218,6 +221,34 @@ class Arguments:
         default=4, metadata={"help": "visual model to encode neighbor images"}
     )
     freeze_lm: Optional[bool] = field(
+        default=False, metadata={"help": "evaluate model on validation set."}
+    )
+    max_text_neighbors: int = field(
+        default=5, metadata={"help": "maximum number of text neighbors"}
+    )
+    max_image_neighbors: int = field(
+        default=5, metadata={"help": "maximum number of image neighbors"}
+    )
+    text_position_type: str = field(
+        default="none", metadata={"help": "position id type for text neighbors"}
+    )
+
+    num_neighbor_layers: int = field(
+        default=4, metadata={"help": "number of cross-attention layers for neighbor information"}
+    )
+    lora_type: str = field(
+        default="none", metadata={"help": "lora type for cross attention"}
+    )
+    lora_r: int = field(
+        default=64, metadata={"help": "lora row rank"}
+    )
+    lora_alpha: float = field(
+        default=1, metadata={"help": "lora scaling factor"}
+    )
+    lora_dropout: float = field(
+        default=0.0, metadata={"help": "lora dropout rate"}
+    )
+    random_flag: Optional[bool] = field(
         default=False, metadata={"help": "evaluate model on validation set."}
     )
 
@@ -284,6 +315,12 @@ def main_worker(gpu, world_size, args, log_dir, run):
         config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
+    elif "mpt" in args.model_name_or_path:
+        args.decoder_only = True
+        args.cross_attention = True
+        args.model_name_or_path = args.model_name_or_path.replace("mpt", "opt")
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
+        model = MPT(args, tokenizer)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
         config = TDOConfig.from_pretrained(
@@ -456,7 +493,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
             #}
             #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
             state = {
-                'epoch': args.epochs,
+                'epoch': epoch,
                 'best_acc1': acc1,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch MPT model."""
+import math
 from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
@@ -25,13 +26,14 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
-from transformers.opt.configuration_opt import OPTConfig
 from transformers import (
     AutoConfig,
     PretrainedConfig,
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     CLIPVisionModel,
+    RobertaModel
 )
 
 from transformers.utils import logging
@@ -79,12 +81,18 @@ class MPTConfig(PretrainedConfig):
             eos_token_id=opt_config.eos_token_id,
             **kwargs,
         )
+        # MPT configuration
+        self.num_neighbor_layers = args.num_neighbor_layers
+        self.lora_type = args.lora_type
+        self.lora_r = args.lora_r
+        self.lora_alpha = args.lora_alpha
+        self.lora_dropout = args.lora_dropout
 
         # OPT configuration
         self.vocab_size = opt_config.vocab_size
         self.max_position_embeddings = opt_config.max_position_embeddings
         self.num_attention_heads = opt_config.num_attention_heads
-        self.word_embed_proj_dim = opt_config.word_embed_proj_dim if word_embed_proj_dim is not None else hidden_size
+        self.word_embed_proj_dim = opt_config.word_embed_proj_dim
         self.ffn_dim = opt_config.ffn_dim
         self.hidden_size = opt_config.hidden_size
         self.num_hidden_layers = opt_config.num_hidden_layers
@@ -129,35 +137,165 @@ class MPTLearnedPositionalEmbedding(nn.Embedding):
         return super().forward(positions + self.offset)
 
 
+class LoraAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.dropout = config.attention_dropout
+        self.head_dim = self.embed_dim // self.num_heads
+        bias = config.enable_bias
+
+        if (self.head_dim * self.num_heads) != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {self.num_heads})."
+            )
+        self.scaling = self.head_dim**-0.5
+        self.is_decoder = False
+
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+
+        self.lora_type = config.lora_type
+        if config.lora_dropout > 0.0:
+            self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+        else:
+            self.lora_dropout = nn.Identity()
+        self.lora_scaling = config.lora_alpha / config.lora_r
+        self.lora_A = nn.Linear(self.embed_dim, config.lora_r, bias=False)
+        self.lora_B = nn.Linear(config.lora_r, self.embed_dim, bias=False)
+
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+
+        bsz, tgt_len, _ = hidden_states.size()
+
+        # get query proj
+        query_states = self.q_proj(hidden_states) * self.scaling
+        # get key, value proj
+        key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
+        value_states = self.lora_B(self.lora_A(self.lora_dropout(key_value_states))) * self.lora_scaling
+        value_states = self._shape(value_states, -1, bsz)
+
+        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
+        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
+        key_states = key_states.view(*proj_shape)
+        value_states = value_states.view(*proj_shape)
+
+        src_len = key_states.size(1)
+        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+
+        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
+            attn_weights = torch.max(
+                attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+            )
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+
+        # upcast to fp32 if the weights are in fp16. Please see https://github.com/huggingface/transformers/pull/17437
+        if attn_weights.dtype == torch.float16:
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(torch.float16)
+        else:
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+
+        if output_attentions:
+            # this operation is a bit awkward, but it's required to
+            # make sure that attn_weights keeps its gradient.
+            # In order to do so, attn_weights have to be reshaped
+            # twice and have to be reused in the following
+            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
+        else:
+            attn_weights_reshaped = None
+
+        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+
+        attn_output = torch.bmm(attn_probs, value_states)
+
+        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
+        attn_output = attn_output.transpose(1, 2)
+
+        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # partitioned aross GPUs when using tensor-parallelism.
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weights_reshaped
+
+
 class MPTAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(
-        self,
-        embed_dim: int,
-        num_heads: int,
-        dropout: float = 0.0,
-        is_decoder: bool = False,
-        bias: bool = True,
-    ):
+    def __init__(self, config, lora):
         super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.dropout = dropout
-        self.head_dim = embed_dim // num_heads
 
-        if (self.head_dim * num_heads) != self.embed_dim:
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.dropout = config.attention_dropout
+        self.head_dim = self.embed_dim // self.num_heads
+        bias = config.enable_bias
+
+        if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {num_heads})."
+                f" and `num_heads`: {self.num_heads})."
             )
         self.scaling = self.head_dim**-0.5
-        self.is_decoder = is_decoder
+        self.is_decoder = False
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+
+        self.lora = lora
+        self.lora_type = config.lora_type
+        if self.lora:
+            if self.lora_type == "none":
+                self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+            elif self.lora_type == "version_1":
+                if config.lora_dropout > 0.0:
+                    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+                else:
+                    self.lora_dropout = nn.Identity()
+                self.lora_scaling = config.lora_alpha / config.lora_r
+                self.lora_A = nn.Linear(self.embed_dim, config.lora_r, bias=False)
+                self.lora_B = nn.Linear(config.lora_r, self.embed_dim, bias=False)
+            elif self.lora_type == "version_2":
+                self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
+                self.cross_attention = LoraAttention(config)
+        else:
+            self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -189,7 +327,18 @@ class MPTAttention(nn.Module):
         elif is_cross_attention:
             # cross_attentions
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+            if self.lora_type == "none":
+                value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+            elif self.lora_type == "version_1":
+                value_states = self.lora_B(self.lora_A(self.lora_dropout(key_value_states))) * self.lora_scaling
+                value_states = self._shape(value_states, -1, bsz)
+            elif self.lora_type == "version_2":
+                new_key_value_states = self.cross_attention(hidden_states=hidden_states,
+                                                            key_value_states=key_value_states,
+                                                            attention_mask=attention_mask)
+                key_states = self._shape(self.k_proj(new_key_value_states), -1, bsz)
+                value_states = self._shape(self.v_proj(new_key_value_states), -1, bsz)
+
         elif past_key_value is not None:
             # reuse k, v, self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
@@ -284,16 +433,10 @@ class MPTAttention(nn.Module):
 
 
 class MPTDecoderLayer(nn.Module):
-    def __init__(self, config: MPTConfig):
+    def __init__(self, config, lora=False):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = MPTAttention(
-            embed_dim=self.embed_dim,
-            num_heads=config.num_attention_heads,
-            dropout=config.attention_dropout,
-            is_decoder=True,
-            bias=config.enable_bias,
-        )
+        self.self_attn = MPTAttention(config, lora)
         self.do_layer_norm_before = config.do_layer_norm_before
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -301,8 +444,24 @@ class MPTDecoderLayer(nn.Module):
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
-        self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
-        self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
+
+        self.lora = lora
+        if self.lora:
+            #if config.lora_dropout > 0.0:
+            #    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
+            #else:
+            #    self.lora_dropout = nn.Identity()
+            #self.lora_scaling = config.lora_alpha / config.lora_r
+            #self.lora_A1 = nn.Linear(self.embed_dim, config.lora_r, bias=False)
+            #self.lora_B1 = nn.Linear(config.lora_r, config.ffn_dim, bias=False)
+            #self.lora_A2 = nn.Linear(config.ffn_dim, config.lora_r, bias=False)
+            #self.lora_B2 = nn.Linear(config.lora_r, self.embed_dim, bias=False)
+            self.adapter1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=False)
+            self.adapter2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=False)
+        else:
+            self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
+            self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
@@ -310,6 +469,7 @@ class MPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
+        neighbor_embeds: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
@@ -339,6 +499,7 @@ class MPTDecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
+            key_value_states=neighbor_embeds,
             past_key_value=past_key_value,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
@@ -360,10 +521,18 @@ class MPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
 
-        hidden_states = self.fc1(hidden_states)
+        if self.lora:
+            #hidden_states = self.lora_B1(self.lora_A1(self.lora_dropout(hidden_states))) * self.lora_scaling
+            hidden_states = self.adapter1(hidden_states)
+        else:
+            hidden_states = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
 
-        hidden_states = self.fc2(hidden_states)
+        if self.lora:
+            #hidden_states = self.lora_B2(self.lora_A2(self.lora_dropout(hidden_states))) * self.lora_scaling
+            hidden_states = self.adapter2(hidden_states)
+        else:
+            hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
         hidden_states = (residual + hidden_states).view(hidden_states_shape)
@@ -445,6 +614,10 @@ class MPTDecoder(MPTPreTrainedModel):
             self.final_layer_norm = None
 
         self.layers = nn.ModuleList([MPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.lora_type = config.lora_type
+        self.neighbor_layer_start = config.num_hidden_layers - config.num_neighbor_layers
+        if self.lora_type != "none":
+            self.neighbor_layers = nn.ModuleList([MPTDecoderLayer(config, lora=True) for _ in range(config.num_neighbor_layers)])
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -486,7 +659,8 @@ class MPTDecoder(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -548,18 +722,13 @@ class MPTDecoder(MPTPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
-        elif input_ids is not None:
+        if input_ids is not None:
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
-        elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
         else:
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
 
         batch_size, seq_length = input_shape
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
@@ -578,6 +747,12 @@ class MPTDecoder(MPTPreTrainedModel):
             attention_mask, input_shape, inputs_embeds, past_key_values_length
         )
         pos_embeds = self.embed_positions(attention_mask, past_key_values_length)
+
+        if neighbor_attention_mask is not None:
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            neighbor_attention_mask = _expand_mask(neighbor_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
+                inputs_embeds.device
+            )
 
         if self.project_in is not None:
             inputs_embeds = self.project_in(inputs_embeds)
@@ -634,14 +809,36 @@ class MPTDecoder(MPTPreTrainedModel):
                     None,
                 )
             else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_attention_mask,
-                    layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
+                if idx < self.neighbor_layer_start:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_attention_mask,
+                        layer_head_mask=(head_mask[idx] if head_mask is not None else None),
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        neighbor_embeds=None if self.lora_type != "none" else neighbor_embeds,
+                        attention_mask=causal_attention_mask if self.lora_type != "none" or neighbor_attention_mask is None else neighbor_attention_mask,
+                        layer_head_mask=(head_mask[idx] if head_mask is not None else None),
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                    )
+                    if self.lora_type != "none":
+                        hidden_states = layer_outputs[0]
+                        layer_outputs = self.neighbor_layers[idx - self.neighbor_layer_start](
+                            hidden_states,
+                            neighbor_embeds=neighbor_embeds,
+                            attention_mask=neighbor_attention_mask,
+                            layer_head_mask=(head_mask[idx] if head_mask is not None else None),
+                            past_key_value=past_key_value,
+                            output_attentions=output_attentions,
+                            use_cache=use_cache,
+                        )
 
             hidden_states = layer_outputs[0]
 
@@ -694,7 +891,8 @@ class MPTModel(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -713,7 +911,8 @@ class MPTModel(MPTPreTrainedModel):
             attention_mask=attention_mask,
             head_mask=head_mask,
             past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
+            neighbor_embeds=neighbor_embeds,
+            neighbor_attention_mask=neighbor_attention_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -731,6 +930,37 @@ class MPTModel(MPTPreTrainedModel):
         )
 
 
+def reset_lora_parameters(model):
+    for n, p in model.named_parameters():
+        if "lora_A" in n:
+            nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+        if "lora_B" in n:
+            nn.init.zeros_(p)
+        if "adapter" in n:
+            identity = torch.eye(p.size(0), p.size(1))
+            # Add small random noise
+            noise = torch.randn(p.size(0), p.size(1)) * 0.01
+            p = identity + noise
+
+def mark_only_lora_as_trainable(model, bias="lora_only"):
+    for n, p in model.named_parameters():
+        if "lora_" not in n and "adapter" not in n:
+            p.requires_grad = False
+    if bias == "none":
+        return
+    elif bias == "all":
+        for n, p in model.named_parameters():
+            if "bias" in n:
+                p.requires_grad = True
+    elif bias == "lora_only":
+        for m in model.modules():
+            if isinstance(m, MPTAttention) and m.lora == True:
+                for n, p in m.named_parameters():
+                    p.requires_grad = True
+    else:
+        raise NotImplementedError
+
+
 class MPTForCausalLM(MPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -743,6 +973,10 @@ class MPTForCausalLM(MPTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+        if config.lora_type != 'none':
+            reset_lora_parameters(self.model)
+            mark_only_lora_as_trainable(self.model)
 
     def get_input_embeddings(self):
         return self.model.decoder.embed_tokens
@@ -768,8 +1002,9 @@ class MPTForCausalLM(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        neighbor_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -846,7 +1081,8 @@ class MPTForCausalLM(MPTPreTrainedModel):
             attention_mask=attention_mask,
             head_mask=head_mask,
             past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
+            neighbor_embeds=neighbor_embeds,
+            neighbor_attention_mask=neighbor_attention_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -907,21 +1143,27 @@ class MPTForCausalLM(MPTPreTrainedModel):
         return reordered_past
 
 
+class TextPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
 class MPT(nn.Module):
     def __init__(self, args, tokenizer):
         super().__init__()
 
-        config = AutoConfig.from_pretrained(args.text_model)
-        self.text_model = AutoModelForSeq2SeqLM.from_pretrained(args.text_model, config=config)
-        self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
-
-        self.initialize_mpt(args)
-        self.tokenizer = tokenizer
         self.args = args
-
-        hidden_size = self.lm.config.hidden_size
-        self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, embedding_dim)
-        self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
+        self.tokenizer = tokenizer
+        self.initialize_mpt(args)
 
         if self.args.freeze_lm:
             self.lm.eval()
@@ -931,19 +1173,33 @@ class MPT(nn.Module):
         else:
             self.lm.train()
 
-        self.text_model.eval()
-        for param in self.text_model.parameters():
-            param.requires_grad = False
+        if self.args.random_flag is False:
+            hidden_size = self.lm.config.hidden_size
+            config = AutoConfig.from_pretrained(args.text_model)
+            self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
+            self.text_pooler = TextPooler(config)
+            self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, hidden_size)
+            if args.text_position_type != "none":
+                self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, hidden_size) # + 1 for padding neighbors
 
-        self.visual_model.eval()
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
+            self.text_model.eval()
+            for name, param in self.text_model.named_parameters():
+                param.requires_grad = False
 
-    def initialize_mpt(args)
+        #self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
+        #self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, hidden_size)
+        #self.visual_model.eval()
+
+        #for param in self.visual_model.parameters():
+        #    param.requires_grad = False
+
+    def initialize_mpt(self, args):
         opt_config = AutoConfig.from_pretrained(args.model_name_or_path)
         opt_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=opt_config)
-
-        mpt_config = MPTConfig(opt_config, args)
+        if args.random_flag:
+            self.lm = opt_model
+            return
+        mpt_config = MPTConfig(args, opt_config)
         mpt_model = MPTForCausalLM(mpt_config)
 
         # copy embeddings
@@ -956,8 +1212,8 @@ class MPT(nn.Module):
             mpt_model.model.decoder.final_layer_norm.load_state_dict(opt_model.model.decoder.final_layer_norm.state_dict())
 
         # copy transformer layers
-        for idx in range(mpt_config.num_hidden_layers):
-            missing_keys, unexpected_keys = mpt_model.model.decoder.layers[idx].load_state_dict(opt_model.model.dncoder.layers[idx].state_dict(), strict=False)
+        for idx in range(opt_config.num_hidden_layers):
+            missing_keys, unexpected_keys = mpt_model.model.decoder.layers[idx].load_state_dict(opt_model.model.decoder.layers[idx].state_dict(), strict=False)
             print(f'{idx}th layer missing_keys: {missing_keys}, unexpected_keys: {unexpected_keys}')
 
         # copy lm_head
@@ -965,11 +1221,20 @@ class MPT(nn.Module):
 
         self.lm = mpt_model
 
-    def get_text_embs(self, input_ids, attention_mask):
+    def get_text_embs(self, input_ids, attention_mask, pos_ids=None):
+        batch_size, neighbor_num, seq_len = input_ids.shape
+        input_ids = input_ids.reshape(-1, seq_len)
+        attention_mask = attention_mask.reshape(-1, seq_len)
+
         outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-        encoder_outputs = outputs.pooler_output
+        encoder_outputs = self.text_pooler(outputs.last_hidden_state)
         text_embs = self.text_embeddings(encoder_outputs)
-        return text_embs
+        text_embs = text_embs.reshape(batch_size, neighbor_num, -1)
+
+        if pos_ids is None:
+            return text_embs
+        else:
+            return text_embs + self.text_position_embeddings(pos_ids)
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
         outputs = self.visual_model(pixel_values)
@@ -978,13 +1243,25 @@ class MPT(nn.Module):
         return visual_embs
 
     def train(self, mode=True):
-        super(MPTModel, self).train(mode=mode)
+        super(MPT, self).train(mode=mode)
         # Overwrite train() to ensure frozen models remain frozen.
         if self.args.freeze_lm:
             self.lm.eval()
-        self.text_model.eval()
-        self.visual_model.eval()
+        if self.args.random_flag is False:
+            self.text_model.eval()
+        #self.visual_model.eval()
 
-    def forward(self, input_ids, attention_mask, labels):
-        output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    def forward(self, input_ids, attention_mask, labels, neighbor_input_ids=None, neighbor_attention_mask=None, neighbor_pos_ids=None):
+        if neighbor_input_ids is None:
+            neighbor_embeds = None
+            neighbor_attention_mask = None
+        else:
+            neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
+            neighbor_attention_mask = neighbor_attention_mask[:, :, 0]
+
+        if self.args.random_flag:
+            return self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+        output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
+                        neighbor_embeds=neighbor_embeds, neighbor_attention_mask=neighbor_attention_mask)
         return output

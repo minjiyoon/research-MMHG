@@ -137,7 +137,6 @@ class LORASelfAttention(nn.Module):
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        #self.value = nn.Linear(config.hidden_size, self.all_head_size)
         if config.lora_dropout > 0.0:
             self.lora_dropout = nn.Dropout(p=config.lora_dropout)
         else:
