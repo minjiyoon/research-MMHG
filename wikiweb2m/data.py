@@ -1,3 +1,4 @@
+import os
 import time
 import torch
 from transformers import AutoTokenizer
@@ -93,13 +94,18 @@ class WikiWeb2M(torch.utils.data.Dataset):
             section_captions.append(image_caption)
 
             image_url = image_urls[section_id][image_id].decode()
+            #try:
+            #    img = Image.open(urlopen(image_url))
+            #except:
+            #    time.sleep(4)
+            #    img = Image.open(urlopen(image_url))
+            file_format = os.path.splitext(image_url)[1][1:]
+            if not os.path.exists(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}'):
+                break
             try:
-                img = Image.open(urlopen(image_url))
+                img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
             except:
-                time.sleep(4)
-                img = Image.open(urlopen(image_url))
-            #file_format = os.path.splitext(image_url)[1][1:]
-            #img = Image.open('./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
+                break
             image = utils.get_pixel_values_for_model(self.feature_extractor, img)
             section_images.append(image)
             # one image per section
@@ -140,6 +146,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 if len(images) > 0 :
                     input_ids = torch.cat([input_ids, torch.LongTensor(len(images) * self.n_visual_tokens * [-1])], dim=0)
                     image_range[0][1] = input_ids.shape[0]
+                    print("images!!")
                 else:
                     # wikiweb2m image padding size
                     images = [torch.zeros((3,  224, 224))]
@@ -170,7 +177,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                     image_range[0][1] = input_ids.shape[0]
                 else:
                     # wikiweb2m image padding size
-                    images = [torch.zeros((3 * 224 * 224))]
+                    images = [torch.zeros((3, 224, 224))]
 
                 for context_id in range(len(d['section_title'])):
                     if context_id == section_id:
@@ -191,7 +198,9 @@ class WikiWeb2M(torch.utils.data.Dataset):
                         images.extend(new_images)
                     else:
                         # wikiweb2m image padding size
-                        images.extend([torch.zeros((3 * 224 * 224))])
+                        images.extend([torch.zeros((3, 224, 224))])
+                    if len(images) == self.max_images:
+                        break
                 if len(input_ids) > self.max_input_length:
                     input_ids = input_ids[:self.max_input_length]
 
@@ -222,6 +231,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         labels = torch.LongTensor(labels_with_ignore_index)
 
         if self.context in ("section_all", "all"):
+            images = torch.stack(images, dim=0)
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "image_ranges": image_range}
         else:
             return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}

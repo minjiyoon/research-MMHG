@@ -248,7 +248,8 @@ class DataParser():
                     continue
                 id_list[split].append(page_id)
             elif task == 'section':
-                are_samples = tf.sparse.to_dense(d[1]['is_section_summarization_sample']).numpy()
+                #are_samples = tf.sparse.to_dense(d[1]['is_section_summarization_sample']).numpy()
+                are_samples = d[1]['is_section_summarization_sample'].values.numpy()
                 for section_id in range(are_samples.shape[0]):
                     is_sample = are_samples[section_id]
                     if is_sample == 0:
@@ -338,6 +339,6 @@ if __name__ == "__main__":
     parser = DataParser()
     #parser.convert_to_numpy()
     #parser.split_preprocess()
-    #parser.split_ids('section')
+    parser.split_ids('section')
     #parser.save_df_torch()
-    parser.download_images()
+    #parser.download_images()
