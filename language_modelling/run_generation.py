@@ -408,11 +408,11 @@ def main_worker(gpu, world_size, args, log_dir, run):
     # Dataloader
     start_time = perf_counter()
     train_loader = DataLoader(train_dataset, batch_size=args.per_device_train_batch_size,
-            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=train_sampler)
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=False, sampler=train_sampler)
     val_loader = DataLoader(val_dataset, batch_size=args.per_device_val_batch_size,
-            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=val_sampler)
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=False, sampler=val_sampler)
     test_loader = DataLoader(test_dataset, batch_size=args.per_device_val_batch_size,
-            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=True, sampler=test_sampler)
+            shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=False, sampler=test_sampler)
     print(f'Initialize dataloaders: {perf_counter()-start_time}')
 
     # Example Dataset

@@ -12,7 +12,7 @@
 ulimit -c unlimited
 #module load cuda-11.1.1
 
-export WANDB_WATCH='all'
+export WANDB_WATCH=false
 export PYTHONPATH=.
 
 #MODEL_NAME='t5-base'
@@ -29,9 +29,9 @@ python language_modelling/run_generation.py \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
-    --num_neighbor_layers 12 \
+    --text_position_type sequence \
     --max_text_neighbors 12 \
-    --text_position_type none \
+    --num_neighbor_layers 6 \
     --lora_type none \
     --max_input_length 512 \
     --max_output_length 128 \
