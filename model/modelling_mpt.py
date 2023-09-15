@@ -281,7 +281,7 @@ class MPTAttention(nn.Module):
         self.lora = lora
         self.lora_type = config.lora_type
         if self.lora:
-            if self.lora_type == "none":
+            if self.lora_type == "none" or self.lora_type == "flamingo":
                 self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
             elif self.lora_type == "version_1":
                 if config.lora_dropout > 0.0:
@@ -306,6 +306,7 @@ class MPTAttention(nn.Module):
         key_value_states: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -326,16 +327,19 @@ class MPTAttention(nn.Module):
             value_states = past_key_value[1]
         elif is_cross_attention:
             # cross_attentions
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-            if self.lora_type == "none":
+            if self.lora_type == "none" or self.lora_type == "flamingo":
+                key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
                 value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+                attention_mask = neighbor_attention_mask
             elif self.lora_type == "version_1":
+                key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
                 value_states = self.lora_B(self.lora_A(self.lora_dropout(key_value_states))) * self.lora_scaling
                 value_states = self._shape(value_states, -1, bsz)
+                attention_mask = neighbor_attention_mask
             elif self.lora_type == "version_2":
                 new_key_value_states = self.cross_attention(hidden_states=hidden_states,
                                                             key_value_states=key_value_states,
-                                                            attention_mask=attention_mask)
+                                                            attention_mask=neighbor_attention_mask)
                 key_states = self._shape(self.k_proj(new_key_value_states), -1, bsz)
                 value_states = self._shape(self.v_proj(new_key_value_states), -1, bsz)
 
@@ -446,6 +450,7 @@ class MPTDecoderLayer(nn.Module):
         )
 
         self.lora = lora
+        self.lora_type = config.lora_type
         if self.lora:
             #if config.lora_dropout > 0.0:
             #    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
@@ -462,6 +467,11 @@ class MPTDecoderLayer(nn.Module):
             self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
             self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
 
+        if self.lora_type == "flamingo":
+            self.tanh_layer = nn.Tanh()
+            self.gating1 = nn.Parameter(torch.tensor(0.0))
+            self.gating2 = nn.Parameter(torch.tensor(0.0))
+
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
@@ -470,6 +480,7 @@ class MPTDecoderLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         neighbor_embeds: Optional[torch.FloatTensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
@@ -502,11 +513,15 @@ class MPTDecoderLayer(nn.Module):
             key_value_states=neighbor_embeds,
             past_key_value=past_key_value,
             attention_mask=attention_mask,
+            neighbor_attention_mask=neighbor_attention_mask,
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
+        if self.lora_type == "flamingo":
+            hidden_states = residual + self.tanh_layer(self.gating1) * hidden_states
+        else:
+            hidden_states = residual + hidden_states
 
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -535,7 +550,10 @@ class MPTDecoderLayer(nn.Module):
             hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        hidden_states = (residual + hidden_states).view(hidden_states_shape)
+        if self.lora_type == "flamingo":
+            hidden_states = (residual + self.tanh_layer(self.gating2) * hidden_states).view(hidden_states_shape)
+        else:
+            hidden_states = (residual + hidden_states).view(hidden_states_shape)
 
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -659,6 +677,7 @@ class MPTDecoder(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         neighbor_embeds: Optional[torch.FloatTensor] = None,
         neighbor_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
@@ -722,13 +741,18 @@ class MPTDecoder(MPTPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
-        if input_ids is not None:
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+        elif input_ids is not None:
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
         else:
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
-        inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
 
         batch_size, seq_length = input_shape
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
@@ -822,7 +846,8 @@ class MPTDecoder(MPTPreTrainedModel):
                     layer_outputs = decoder_layer(
                         hidden_states,
                         neighbor_embeds=None if self.lora_type != "none" else neighbor_embeds,
-                        attention_mask=causal_attention_mask if self.lora_type != "none" or neighbor_attention_mask is None else neighbor_attention_mask,
+                        attention_mask=causal_attention_mask,
+                        neighbor_attention_mask=neighbor_attention_mask,
                         layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                         past_key_value=past_key_value,
                         output_attentions=output_attentions,
@@ -833,6 +858,7 @@ class MPTDecoder(MPTPreTrainedModel):
                         layer_outputs = self.neighbor_layers[idx - self.neighbor_layer_start](
                             hidden_states,
                             neighbor_embeds=neighbor_embeds,
+                            attention_mask=attention_mask,
                             attention_mask=neighbor_attention_mask,
                             layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                             past_key_value=past_key_value,
@@ -891,6 +917,7 @@ class MPTModel(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         neighbor_embeds: Optional[torch.FloatTensor] = None,
         neighbor_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
@@ -911,6 +938,7 @@ class MPTModel(MPTPreTrainedModel):
             attention_mask=attention_mask,
             head_mask=head_mask,
             past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
             neighbor_embeds=neighbor_embeds,
             neighbor_attention_mask=neighbor_attention_mask,
             use_cache=use_cache,
@@ -1002,6 +1030,7 @@ class MPTForCausalLM(MPTPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         neighbor_embeds: Optional[torch.FloatTensor] = None,
         neighbor_attention_mask: Optional[torch.Tensor] = None,
@@ -1081,6 +1110,7 @@ class MPTForCausalLM(MPTPreTrainedModel):
             attention_mask=attention_mask,
             head_mask=head_mask,
             past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
             neighbor_embeds=neighbor_embeds,
             neighbor_attention_mask=neighbor_attention_mask,
             use_cache=use_cache,
@@ -1173,6 +1203,8 @@ class MPT(nn.Module):
         else:
             self.lm.train()
 
+        self.input_embeddings = self.lm.get_input_embeddings()
+
         if self.args.random_flag is False:
             hidden_size = self.lm.config.hidden_size
             config = AutoConfig.from_pretrained(args.text_model)
@@ -1262,6 +1294,14 @@ class MPT(nn.Module):
         if self.args.random_flag:
             return self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-        output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
+        if self.args.lora_type == "gill":
+            input_embs = self.input_embeddings(input_ids)
+            input_embs = torch.cat((neighbor_embs, input_embeds), dim=1)
+            attention_mask = torch.cat((neighbor_attention_mask, attention_mask), dim=1)
+            labels = torch.cat((-100 * torch.ones_like(neighbor_embs), labels), dim=1)
+            output = self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
+        else:
+            output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
                         neighbor_embeds=neighbor_embeds, neighbor_attention_mask=neighbor_attention_mask)
-        return output
+
+            return output

@@ -316,7 +316,7 @@ class DataParser():
                 continue
             if page_id == 200000:
                 break
-            if page_id % 10000 == 0:
+            if page_id % 1000 == 0:
                 print(page_id, 'have processed...')
             image_urls = tf.sparse.to_dense(d[1]['section_image_url']).numpy()
             for section_id in range(image_urls.shape[0]):
@@ -326,42 +326,35 @@ class DataParser():
                         continue
                     image_url = image_url.decode()
                     file_format = os.path.splitext(image_url)[1][1:]
-                    file_name = f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}'
+                    #file_name = f'{self.path}images/{page_id}_{section_id}_{image_id}.{file_format}'
+                    file_name = f'/projects/rsalakhugroup/minjiy/images/{page_id}_{section_id}_{image_id}.{file_format}'
                     if os.path.exists(file_name):
+                        break
+
+                    another_image = False
+                    try:
+                        response = requests.get(image_url, headers=headers)
+                        response.raise_for_status()
+                    except requests.exceptions.HTTPError as e:
+                        if "404 Client Error: Not Found for url" in str(e):
+                            another_image = True
+                            continue
+                        else:
+                            time.sleep(1)
+                            response = requests.get(image_url)
+
+                    with open(file_name, 'wb') as file:
+                        for chunk in response.iter_content(8192):
+                            file.write(chunk)
+
+                    try:
+                        img = Image.open(file_name)
+                    except:
+                        os.remove(file_name)
+                        another_image = True
                         continue
 
-                    retry = True
-                    another_image = False
-                    retried_num = 1
-                    while retry:
-                        if retried_num % 5 == 0:
-                            print(f'retried {retried_num} times for {image_url}: {file_name}')
-                        if retried_num == 20:
-                            break
-                        try:
-                            response = requests.get(image_url, headers=headers)
-                            response.raise_for_status()
-                        except requests.exceptions.HTTPError as e:
-                            if "404 Client Error: Not Found for url" in str(e):
-                                retry = False
-                                another_image = True
-                                break
-                            else:
-                                time.sleep(1)
-                                response = requests.get(image_url)
-                                response.raise_for_status()
-                        with open(file_name, 'wb') as file:
-                            for chunk in response.iter_content(8192):
-                                file.write(chunk)
-
-                        try:
-                            img = Image.open(file_name)
-                            retry = False
-                        except:
-                            time.sleep(1)
-                            retry = True
-                            retried_num += 1
-                    if retry == False and another_image == False:
+                    if another_image == False:
                         break
 
 

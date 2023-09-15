@@ -16,20 +16,18 @@
 # limitations under the License.
 """ Finetuning summary generation models"""
 import json
+import os
 import sys
+import tqdm
 import wandb
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-from dataclasses import dataclass, field
 import time
 from time import perf_counter
-import tqdm
+from dataclasses import dataclass, field
 from typing import Optional
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Only display errors
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import numpy as np
 
@@ -37,15 +35,16 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 mp.set_sharing_strategy('file_system')
+from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import StepLR
 from torchmetrics import BLEUScore
 from warmup_scheduler import GradualWarmupScheduler
 
 from datasets import load_dataset
+import evaluate
 import transformers
 from transformers import (
     AutoConfig,
@@ -57,20 +56,19 @@ from transformers import (
     get_scheduler,
 )
 from transformers.optimization import Adafactor
-from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
-import evaluate
+
 from wikiweb2m import load_wikiweb2m, WikiWeb2M
 from wikiweb2m.cider import Cider
 
 from language_modelling import utils
-from model import T5Image, MPT
-#from model import TDOConfig, TDOForMaskedLM, TDOForSequenceClassification
+from model import T5Image, MPT, PEFT
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Only display errors
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 best_acc1 = 0  # Variable to keep track of best model so far.
@@ -102,18 +100,7 @@ class Arguments:
     max_output_length: Optional[int] = field(
         default=128, metadata={"help": "maximum token length of output text"}
     )
-    sample_depth: Optional[int] = field(
-        default=1, metadata={"help": "neighborhood hops for the computation graph sampling."}
-    )
-    sample_num: Optional[int] = field(
-        default=5, metadata={"help": "number of neighbors to sample per node."}
-    )
-    position_type: Optional[str] = field(
-        default='no_position', metadata={"help": "position encoding methods for neighbors (node_type, layer, layer_node_type, metapath)."}
-    )
-    duplicate_encoding: Optional[bool] = field(
-        default=False, metadata={"help": "how to encode computation graphs"}
-    )
+
     wandb_project: Optional[str] = field(
         default='MMHG', metadata={"help": "wandb project name"}
     )
@@ -166,13 +153,9 @@ class Arguments:
     val_steps_per_epoch: Optional[int] = field(
         default=1000, metadata={"help": "Number of training steps per epoch."}
     )
-    save_epoch: Optional[int] = field(
-        default=1, metadata={"help": "Starting epoch."}
-    )
     print_freq: Optional[int] = field(
         default=50, metadata={"help": "print frequency (default: 10)"}
     )
-
 
     learning_rate: Optional[float] = field(
         default=0.001, metadata={"help": "initial learning rate."}
@@ -217,6 +200,9 @@ class Arguments:
     visual_model: str = field(
         default="openai/clip-vit-base-patch16", metadata={"help": "visual model to encode neighbor images"}
     )
+    n_text_tokens: int = field(
+        default=4, metadata={"help": "visual model to encode neighbor images"}
+    )
     n_visual_tokens: int = field(
         default=4, metadata={"help": "visual model to encode neighbor images"}
     )
@@ -229,7 +215,7 @@ class Arguments:
     max_image_neighbors: int = field(
         default=5, metadata={"help": "maximum number of image neighbors"}
     )
-    text_position_type: str = field(
+    position_type: str = field(
         default="none", metadata={"help": "position id type for text neighbors"}
     )
 

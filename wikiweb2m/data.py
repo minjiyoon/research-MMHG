@@ -9,15 +9,6 @@ from urllib.request import urlopen
 
 from language_modelling import utils
 
-def load_wikiweb2m_tf(task):
-    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_train_medium.pkl', 'rb') as f:
-        train_dataset = pickle.load(f)
-    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_val_medium.pkl', 'rb') as f:
-        val_dataset = pickle.load(f)
-    with open(f'./wikiweb2m/raw/wikiweb2m_{task}_test_medium.pkl', 'rb') as f:
-        test_dataset = pickle.load(f)
-
-    return train_dataset, val_dataset[:10000], test_dataset[:10000]
 
 def load_wikiweb2m(task):
     train_df = pd.read_parquet(f'./wikiweb2m/raw/wikiweb2m_train_large.parquet')
@@ -32,17 +23,18 @@ def load_wikiweb2m(task):
 
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, df, id_list, tokenizer, feature_extractor_model=None):
+    def __init__(self, args, df, id_list, tokenizer, visual_feature_extractor_model=None):
         self.path = './wikiweb2m/raw/'
+        self.image_path = '/projects/rsalakhugroup/minjiy/images/'
+
         self.task = args.task
         self.context = args.context
         self.decoder_only = args.decoder_only
         self.cross_attention = args.cross_attention
-        self.random_flag = args.random_flag
 
-        self.max_texts = args.max_text_neighbors
-        self.max_images = args.max_image_neighbors
-        self.text_position_type = args.text_position_type
+        self.max_text_neighbors = args.max_text_neighbors
+        self.max_image_neighbors = args.max_image_neighbors
+        self.position_type = args.position_type
 
         self.df = df
         self.id_list = id_list
@@ -50,9 +42,11 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
 
-        if feature_extractor_model is not None and self.context in ('section_all', 'all'):
-            self.feature_extractor = utils.get_feature_extractor_for_model(feature_extractor_model)
-            self.n_visual_tokens = args.n_visual_tokens
+        if visual_feature_extractor_model is not None and self.context in ('section_all', 'all'):
+            self.visual_feature_extractor = utils.get_feature_extractor_for_model(visual_feature_extractor_model)
+
+        self.n_text_tokens = args.n_text_tokens
+        self.n_visual_tokens = args.n_visual_tokens
 
     def __len__(self):
         return len(self.id_list)
@@ -61,238 +55,220 @@ class WikiWeb2M(torch.utils.data.Dataset):
         page_url = d['page_url'].decode()
         page_title = d['page_title'].decode()
         page_description = d['page_description'].decode()
-        #return ", ".join([page_title, page_url, page_description])
-        return ", ".join([page_title, page_description])
+        page_info = ', '.join([page_title, page_description])
+        return ' '.join(page_info.replace('\n', '').split())
 
     def get_section_info(self, section_id, d, remove_summary=True):
-        page_title = d['page_title'].decode()
-        section_title = d['section_title'][section_id].decode()
         section_depth = str(d['section_depth'][section_id])
         section_heading = str(d['section_heading'][section_id])
         section_parent_index = str(d['section_parent_index'][section_id])
+        section_title = d['section_title'][section_id].decode()
         section_summary = d['section_summary'][section_id].decode()
         section_rest_sentence = d['section_rest_sentence'][section_id].decode()
         if remove_summary:
-            section_info = ", ".join([section_rest_sentence])
+            section_info = ', '.join([section_rest_sentence])
             section_info, section_summary = ' '.join(section_info.replace('\n', '').split()), ' '.join(section_summary.replace('\n', '').split())
             return section_info, section_summary
         else:
-            section_info = ", ".join([section_summary, section_rest_sentence])
+            section_info = ', '.join([section_summary, section_rest_sentence])
             section_info = ' '.join(section_info.replace('\n', '').split())
             return section_info
 
     def get_section_images(self, page_id, section_id, d):
-        section_images = []
-        section_captions = []
         section_num = d['section_title'].shape[0]
         image_urls = d['image_url'].reshape(section_num, -1)
         image_captions = d['image_caption'].reshape(section_num, -1)
         for image_id in range(image_urls[section_id].shape[0]):
-            if image_urls[section_id][image_id] == b'':
-                continue
-            image_caption = image_captions[section_id][image_id].decode()
-            section_captions.append(image_caption)
-
             image_url = image_urls[section_id][image_id].decode()
-            #try:
-            #    img = Image.open(urlopen(image_url))
-            #except:
-            #    time.sleep(4)
-            #    img = Image.open(urlopen(image_url))
             file_format = os.path.splitext(image_url)[1][1:]
-            if not os.path.exists(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}'):
-                break
-            try:
-                img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
-            except:
-                break
-            image = utils.get_pixel_values_for_model(self.feature_extractor, img)
-            section_images.append(image)
-            # one image per section
-            break
-        return ", ".join(section_captions), section_images
+            file_name = f'{self.image_path}/{page_id}_{section_id}_{image_id}.{file_format}'
+            if os.path.exists(file_name):
+                try:
+                    img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
+                    section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
+                    section_caption = image_captions[section_id][image_id].decode()
+                    return section_image, ' '.join(section_caption.replace('\n', '').split())
+                except:
+                    continue
+        return None, None
 
     def __getitem__(self, index):
-        if self.random_flag is False:
-            if self.cross_attention:
-                return self.get_mmg_item(index)
+        if self.cross_attention:
+            return self.get_cross_attention_item(index)
 
-        if self.task == "section":
-            page_id, section_id = self.id_list[index]
-            d = self.df[self.df['page_id'] == page_id].iloc[0]
-            images = None
-            if self.context == "section_only":
-                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+        page_id, section_id = self.id_list[index]
+        d = self.df[self.df['page_id'] == page_id].iloc[0]
+        if self.context == 'section_only':
+            section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+            inputs = 'summarize: ' + section_info
+            input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+
+        elif self.context == "section_all":
+            section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+            image, image_caption = self.get_section_images(page_id, section_id, d)
+
+            images = []
+            image_positions = []
+            if image is None:
                 inputs = "summarize: " + section_info
-                inputs = ' '.join(inputs.replace('\n', '').split())
                 input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                images.append(torch.zeros((3,  224, 224)))
+                image_positions.append(torch.LongTensor([-1]))
+            else:
+                inputs = "summarize: " + section_info + ", conext: " + image_caption
+                max_text_length = self.max_input_length - self.n_visual_tokens
+                input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                input_ids = torch.cat([input_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                images.append(image)
+                image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
 
-            elif self.context == "section_all":
-                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                image_captions, images = self.get_section_images(page_id, section_id, d)
-                inputs = "summarize: " + section_info + image_captions
+        elif self.context == "text_only":
+            page_info = self.get_page_info(d)
+            section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+            context_info = []
+            for context_id in range(len(d['section_title'])):
+                if context_id == section_id:
+                    continue
+                context_info.append(self.get_section_info(context_id, d, remove_summary=False))
+            context_info = ', '.join(context_info)
+            inputs = "summarize: " + section_info + ", context: " + page_info + context_info
+            input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
 
-                max_text_len = self.max_input_length - len(images) * self.n_visual_tokens
-                input_ids = self.tokenizer(inputs, max_length=max_text_len, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                image_range = torch.LongTensor([[input_ids.shape[0], input_ids.shape[0]]])
-                if len(images) > 0 :
-                    input_ids = torch.cat([input_ids, torch.LongTensor(len(images) * self.n_visual_tokens * [-1])], dim=0)
-                    image_range[0][1] = input_ids.shape[0]
-                    print("images!!")
+        elif self.context == "all":
+            page_info = self.get_page_info(d)
+            section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
+            section_image, section_caption = self.get_section_images(page_id, section_id, d)
+
+            images = []
+            image_positions = []
+            if section_image is None:
+                inputs = "summarize: " + section_info
+                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                images.append(torch.zeros((3,  224, 224)))
+                image_positions.append(torch.LongTensor([-1]))
+            else:
+                inputs = "summarize: " + section_info + ", conext: " + section_caption
+                max_text_length = self.max_input_length - self.n_visual_tokens
+                input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                input_ids = torch.cat([input_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                images.append(section_image)
+                image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
+
+            for context_id in range(len(d['section_title'])):
+                if context_id == section_id:
+                    continue
+                context_info = self.get_section_info(context_id, d, remove_summary=False)
+                context_image, context_caption = self.get_section_images(page_id, context_id, d)
+                if context_image is None:
+                    context = context_info
+                    context_ids = self.tokenizer(context, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                    input_ids = torch.cat([input_ids, context_ids], dim=0)
+                    images.append(torch.zeros((3,  224, 224)))
+                    image_positions.append(torch.LongTensor([-1]))
                 else:
-                    # wikiweb2m image padding size
-                    images = [torch.zeros((3,  224, 224))]
+                    context = context_info + context_caption
+                    max_text_length = self.max_input_length - self.n_visual_tokens
+                    context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                    input_ids = torch.cat([input_ids, context_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                    images.append(context_image)
+                    image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
 
-            elif self.context == "text_only":
-                page_info = self.get_page_info(d)
-                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                context_info = []
-                for context_id in range(len(d['section_title'])):
-                    if context_id == section_id:
-                        continue
-                    context_info.append(self.get_section_info(context_id, d, remove_summary=False))
-                context_info = ', '.join(context_info)
-                inputs = "summarize: " + section_info + ", context: " + page_info + context_info
-                inputs = ' '.join(inputs.replace('\n', '').split())
-                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            if len(input_ids) > self.max_input_length:
+                input_ids = input_ids[:self.max_input_length]
 
-            elif self.context == "all":
-                page_info = self.get_page_info(d)
-                section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
-                image_captions, images = self.get_section_images(page_id, section_id, d)
-                inputs = "summarize: " + section_info + image_captions
-
-                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                image_range = [[input_ids.shape[0], input_ids.shape[0]]]
-                if len(images) > 0:
-                    input_ids = torch.cat([input_ids, torch.LongTensor(len(images) * self.n_visual_tokens * [-1])], dim=0)
-                    image_range[0][1] = input_ids.shape[0]
-                else:
-                    # wikiweb2m image padding size
-                    images = [torch.zeros((3, 224, 224))]
-
-                for context_id in range(len(d['section_title'])):
-                    if context_id == section_id:
-                        continue
-                    context_info = self.get_section_info(context_id, d, remove_summary=False)
-                    image_captions, new_images = self.get_section_images(page_id, context_id, d)
-                    if len(images) == 1:
-                        inputs = "context: " + context_info + image_captions
-                    else:
-                        inputs = ", " + context_info + image_captions
-
-                    new_input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                    input_ids = torch.cat([input_ids, new_input_ids], dim=0)
-                    image_range.append([input_ids.shape[0], input_ids.shape[0]])
-                    if len(new_images) > 0 :
-                        input_ids = torch.cat([input_ids, torch.LongTensor(len(new_images) * self.n_visual_tokens * [-1])], dim=0)
-                        image_range[-1][1] = input_ids.shape[0]
-                        images.extend(new_images)
-                    else:
-                        # wikiweb2m image padding size
-                        images.extend([torch.zeros((3, 224, 224))])
-                    if len(images) == self.max_images:
-                        break
-                if len(input_ids) > self.max_input_length:
-                    input_ids = input_ids[:self.max_input_length]
-
-        # OPT
         if self.decoder_only:
             model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
             labels = ", summary: " + labels
-            labels = ' '.join(labels.replace('\n', '').split())
             label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            # Remove SOS token and add EOS token
             label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
-            labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
-            return {
-                    "input_ids": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
-                    "attention_mask": torch.cat([model_inputs.attention_mask[0], labels.attention_mask[0]], dim=0),
-                    "labels": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0)
-                    }
+            model_outputs = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
 
-        # Padding
-        model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
+            result = {"input_ids": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0),\
+                      "attention_mask": torch.cat((model_inputs.attention_mask[0], model_outputs.attention_mask[0]), dim=0),\
+                      "labels": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0)}
 
-        labels = ' '.join(labels.replace('\n', '').split())
-        label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-        labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt").input_ids[0]
-        labels_with_ignore_index = [label if label != 0 else -100 for label in labels]
-
-        input_ids = model_inputs.input_ids[0]
-        attention_mask = model_inputs.attention_mask[0]
-        labels = torch.LongTensor(labels_with_ignore_index)
+        else:
+            model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
+            labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids[0]
+            labels_with_ignore_index = torch.LongTensor([label if label != 0 else -100 for label in labels])
+            result = {"input_ids": model_inputs.input_ids[0], "attention_mask": model_inputs.attention_mask[0], "labels": labels_with_ignore_index}
 
         if self.context in ("section_all", "all"):
             images = torch.stack(images, dim=0)
-            return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels, "images": images, "image_ranges": image_range}
-        else:
-            return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+            image_positions = torch.stack(image_positions, dim=0)
+            result["images"] = images
+            result["image_positions"] = image_positions
 
+        return result
 
-    def get_mmg_item(self, index):
+    def get_cross_attention_item(self, index):
         page_id, section_id = self.id_list[index]
         d = self.df[self.df['page_id'] == page_id].iloc[0]
-        images = None
 
-        # OPT input/label style
         section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
         inputs = "summarize: " + section_info
-        inputs = ' '.join(inputs.replace('\n', '').split())
         model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
 
         labels = ", summary: " + labels
-        labels = ' '.join(labels.replace('\n', '').split())
         label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+        # Remove SOS token and add EOS token
         label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
-        labels = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
+        model_outputs = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
 
-        #Multimodal neighbor information
-        neighbor_text = []
-        position_ids = []
+        # Multimodal neighbor information
+        neighbor_texts = []
+        neighbor_images = []
+        position_texts = []
+        position_images = []
 
         #(1) page information
         page_info = self.get_page_info(d)
-        neighbor_text.append(page_info)
-        position_ids.append(len(position_ids))
+        neighbor_texts.append(page_info)
 
-        #(2) neighbor section information
+        #(2) session image information
+        section_image, section_caption = self.get_section_images(page_id, section_id, d)
+        if section_image is not None:
+            neighbor_images.append(section_image)
+            neighbor_texts.append(section_caption)
+
+        #(3) rest section information
         for context_id in range(len(d['section_title'])):
             if context_id == section_id:
                 continue
-            if len(neighbor_text) == self.max_texts:
-                break
-            context_info = self.get_section_info(context_id, d, remove_summary=False)
-            neighbor_text.append(context_info)
-            if self.text_position_type == "sequence":
-                position_ids.append(len(position_ids))
-            elif self.text_position_type == "relative":
-                position_id = section_id - context_id
-                if position_id > 0:
-                    position_id = 2 * position_id - 1
-                else:
-                    position_id = -2 * position_id
-                if position_id > self.max_output_length - 1:
-                    position_id = self.max_output_length - 1
-                position_ids.append(position_id)
+            if len(neighbor_texts) < self.max_text_neighbors:
+                context_info = self.get_section_info(context_id, d, remove_summary=False)
+                neighbor_texts.append(context_info)
 
-        #Pad
-        position_ids = [position_id + 1 for position_id in position_ids]
-        while len(neighbor_text) < self.max_texts:
-            neighbor_text.append('')
-            position_ids.append(0)
+            if len(neighbor_images) < self.max_image_neighbors:
+                context_image, context_caption = self.get_section_images(page_id, context_id, d)
+                if context_image is not None:
+                    neighbor_images.append(context_image)
+                    if len(neighbor_texts) < self.max_text_neighbors:
+                        neighbor_texts.append(context_caption)
+
+        # Increase position ids by 1 for padding_id
+        position_texts = [position_id + 1 for position_id in position_texts]
+        position_images = [position_id + 1 for position_id in position_images]
+        # Pad
+        while len(neighbor_texts) < self.max_text_neighbors:
+            neighbor_texts.append('')
+            position_texts.append(0)
+        while len(neighbor_images) < self.max_image_neighbors:
+            neighbor_images.append(torch.zeros((3,  224, 224)))
+            position_images.append(0)
 
         #Tokenize
-        neighbor_text = self.tokenizer(neighbor_text, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        result = {
-                "input_ids": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
-                "attention_mask": torch.cat([model_inputs.attention_mask[0], labels.attention_mask[0]], dim=0),
-                "labels": torch.cat([model_inputs.input_ids[0], labels.input_ids[0]], dim=0),
-                "neighbor_input_ids": neighbor_text.input_ids,
-                "neighbor_attention_mask": neighbor_text.attention_mask,
+        neighbor_texts = self.tokenizer(neighbor_texts, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+        result = {"input_ids": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0), \
+                  "attention_mask": torch.cat((model_inputs.attention_mask[0], model_outputs.attention_mask[0]), dim=0), \
+                  "labels": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0), \
+                  "neighbor_input_ids": neighbor_texts.input_ids,
+                  "neighbor_attention_mask": neighbor_texts.attention_mask,
+                  "neighbor_pos_ids": torch.LongTensor(position_texts),
+                  "neighbor_images": torch.stack(neighbor_images, dim=0),
+                  "neighbor_images_pos_ids": torch.LongTensor(position_images)
                 }
-        if self.text_position_type != "none":
-            result["neighbor_pos_ids"] = torch.LongTensor(position_ids)
-
         return result
 
 
