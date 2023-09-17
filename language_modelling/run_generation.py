@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ Finetuning summary generation models"""
+from collections import OrderedDict
 import json
 import os
 import random
@@ -41,7 +42,7 @@ mp.set_sharing_strategy('file_system')
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import StepLR
-from torchmetrics import BLEUScore
+from torchmetrics import BLEUScore, ROUGEScore
 from warmup_scheduler import GradualWarmupScheduler
 
 from datasets import load_dataset
@@ -64,7 +65,7 @@ from wikiweb2m import load_wikiweb2m, WikiWeb2M
 from wikiweb2m.cider import Cider
 
 from language_modelling import utils
-from model import T5Image, MPT, PEFT
+from model import SelfAttentionModel, CrossAttentionModel
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.17.0")
@@ -226,7 +227,7 @@ class Arguments:
     num_neighbor_layers: int = field(
         default=4, metadata={"help": "number of cross-attention layers for neighbor information"}
     )
-    lora_type: str = field(
+    peft_type: str = field(
         default="none", metadata={"help": "lora type for cross attention"}
     )
     lora_r: int = field(
@@ -253,12 +254,8 @@ def main():
     os.makedirs(log_dir)
     args.save_dir = os.path.join(log_dir, 'ckpt.pth.tar')
 
-    # Logging
-    combined_args = {**vars(args)}
-    with open(os.path.join(log_dir, f'args.json'), 'w') as wf:
-        json.dump(combined_args, wf, indent=4)
-
     # Wandb logging
+    combined_args = {**vars(args)}
     run = wandb.init(project=args.wandb_project, name=args.wandb_run)
     run.config.update(combined_args)
 
@@ -286,44 +283,24 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     # Prepare pretrained model
     if "t5" in args.model_name_or_path:
-        config = AutoConfig.from_pretrained(args.model_name_or_path)
+        args.decoder_only = False
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        if args.context in ("section_all", "all"):
-            model = T5Image(args, tokenizer)
-        else:
-            model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
+        model = SelfAttentionModel(args, tokenizer)
     elif "opt" in args.model_name_or_path:
         args.decoder_only = True
-        config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
+        model = SelfAttentionModel(args, tokenizer)
     elif "mpt" in args.model_name_or_path:
         args.decoder_only = True
-        args.cross_attention = True
         args.model_name_or_path = args.model_name_or_path.replace("mpt", "opt")
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        model = MPT(args, tokenizer)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        config = TDOConfig.from_pretrained(
-                args.model_name_or_path,
-                cache_dir=args.cache_dir)
-        model = TDOForMaskedLM.from_pretrained(
-                args.model_name_or_path,
-                config=config,
-                cache_dir=args.cache_dir)
-        if args.position_type != "no_position":
-            model.text_decoder.set_neighbor_position_ids(raw_dataset.position_ids)
+        model = CrossAttentionModel(args, tokenizer)
 
     tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
     if args.fp16:
         model = model.float()
     elif args.bf16:
         model = model.bfloat16()
-
-    param_counts_text = utils.get_params_count_str(model)
-    with open(os.path.join(log_dir, 'param_count.txt'), 'w') as f:
-        f.write(param_counts_text)
 
     # Wandb logging
     if gpu % world_size == 0:
@@ -332,7 +309,6 @@ def main_worker(gpu, world_size, args, log_dir, run):
         run.config.update({"total_params": total_trainable_params + total_nontrainable_params})
         run.config.update({"trainable_params": total_trainable_params})
         run.config.update({"non_trainable_params": total_nontrainable_params})
-
 
     torch.cuda.set_device(gpu)
     model.cuda(gpu)
@@ -343,10 +319,11 @@ def main_worker(gpu, world_size, args, log_dir, run):
         optimizer = Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=args.learning_rate)
         scheduler = None
     elif "opt" in args.model_name_or_path:
+        print('Using AdamW as the optimizer.')
         optimizer_cls = torch.optim.AdamW
         optimizer = optimizer_cls(model.parameters(), args.learning_rate,
-                betas=(args.adam_beta1, args.adam_beta2),
-                weight_decay=args.weight_decay, eps=1e-8)
+                                    betas=(args.adam_beta1, args.adam_beta2),
+                                    weight_decay=args.weight_decay, eps=1e-8)
         """Sets the learning rate to the initial LR decayed by 10 every 5 epochs"""
         scheduler_steplr = StepLR(optimizer, step_size=(args.lr_schedule_step_size * args.steps_per_epoch) // args.grad_accumulation_steps, gamma=args.lr_schedule_gamma)
         scheduler = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=args.lr_warmup_steps, after_scheduler=scheduler_steplr)
@@ -356,7 +333,6 @@ def main_worker(gpu, world_size, args, log_dir, run):
         checkpoint_path = os.path.join(args.log_dir, args.resume, 'ckpt.pth.tar')
         if os.path.isfile(checkpoint_path):
             print("=> loading checkpoint '{}'".format(checkpoint_path))
-            # Map model to be loaded to specified single gpu.
             loc = 'cuda:{}'.format(gpu)
             checkpoint = torch.load(checkpoint_path, map_location=loc)
             args.start_epoch = checkpoint['epoch']
@@ -397,69 +373,18 @@ def main_worker(gpu, world_size, args, log_dir, run):
             shuffle=False, num_workers=args.dataloader_num_workers, prefetch_factor=10, pin_memory=False, sampler=test_sampler)
     print(f'Initialize dataloaders: {perf_counter()-start_time}')
 
-    # Example Dataset
-    #raw_datasets = load_dataset("cnn_dailymail", "3.0.0")
-    #column_names = raw_datasets["train"].column_names
-    #text_column = "article"
-    #summary_column = "highlights"
-    #prefix = "summarize: "
-
-    #def preprocess_function(examples):
-    #    inputs = examples[text_column]
-    #    targets = examples[summary_column]
-    #    inputs = [prefix + inp for inp in inputs]
-    #    model_inputs = tokenizer(inputs, max_length=args.max_input_length, padding="max_length", truncation=True)
-    #    labels = tokenizer(text_target=targets, max_length=args.max_output_length, padding="max_length", truncation=True)
-
-    #    labels["input_ids"] = [
-    #        [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
-    #    ]
-    #    model_inputs["labels"] = labels["input_ids"]
-    #    return model_inputs
-
-    #train_dataset = raw_datasets["train"].map(
-    #    preprocess_function,
-    #    batched=True,
-    #    num_proc=args.dataloader_num_workers,
-    #    remove_columns=column_names,
-    #    load_from_cache_file=True,
-    #    desc="Running tokenizer on dataset",
-    #)
-
-    #max_target_length = args.max_output_length
-    #eval_dataset = raw_datasets["validation"].map(
-    #    preprocess_function,
-    #    batched=True,
-    #    num_proc=args.dataloader_num_workers,
-    #    remove_columns=column_names,
-    #    load_from_cache_file=True,
-    #    desc="Running tokenizer on dataset",
-    #)
-
-    #label_pad_token_id = -100
-    #data_collator = DataCollatorForSeq2Seq(
-    #    tokenizer,
-    #    model=model,
-    #    label_pad_token_id=label_pad_token_id,
-    #    pad_to_multiple_of=8,
-    #)
-
-    #train_dataloader = DataLoader(
-    #    train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
-    #)
-    #val_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
-
     if args.test:
         evaluate_loop(test_loader, model, tokenizer, epoch, args, run)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        #if epoch == 0:
-        #    evaluate_loop(val_loader, model, tokenizer, epoch-1, args, run)
+        if epoch == 0:
+            evaluate_loop(val_loader, model, tokenizer, epoch-1, args, run)
 
-        train_sampler.set_epoch(epoch)
         # train for one epoch
+        train_sampler.set_epoch(epoch)
         train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args, run)
+
         # evaluate on validation set
         acc1 = evaluate_loop(val_loader, model, tokenizer, epoch, args, run)
 
@@ -469,15 +394,15 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
         if gpu % world_size == 0 and (is_best or epoch == 0):
             # Only save non-frozen parameters.
-            #stripped_state_dict = {
-            #    k: v for k, v in model.state_dict().items() if
-            #    ('.lm' not in k and '.visual_model' not in k)
-            #}
-            #stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
+            stripped_state_dict = {
+                k: v for k, v in model.state_dict().items() if
+                ('.text_model' not in k and '.visual_model' not in k)
+            }
+            stripped_state_dict = OrderedDict(sorted(stripped_state_dict.items()))
             state = {
                 'epoch': epoch,
                 'best_acc1': acc1,
-                'state_dict': model.state_dict(),
+                'state_dict': stripped_state_dict,
                 'optimizer' : optimizer.state_dict(),
             }
             if scheduler is not None:
@@ -487,7 +412,6 @@ def main_worker(gpu, world_size, args, log_dir, run):
     # Test
     checkpoint_path = args.save_dir
     print("=> loading best val checkpoint '{}'".format(checkpoint_path))
-    # Map model to be loaded to specified single gpu.
     loc = 'cuda:{}'.format(gpu)
     checkpoint = torch.load(checkpoint_path, map_location=loc)
     model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -577,6 +501,8 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
     gpu, world_size = dist.get_rank(), dist.get_world_size()
     ngpus_per_node = torch.cuda.device_count()
     bleu_scorers = [BLEUScore(n_gram=i) for i in [1, 2, 3, 4]]
+    rouge_scorer = ROUGEScore()
+    cider_scorer = Cider()
     actual_step = ((epoch + 1) * args.steps_per_epoch) // args.grad_accumulation_steps
 
     batch_time = utils.AverageMeter('Time', ':6.3f', utils.Summary.AVERAGE)
@@ -585,6 +511,11 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
     bleu2 = utils.AverageMeter('BLEU@2', ':6.2f', utils.Summary.AVERAGE)
     bleu3 = utils.AverageMeter('BLEU@3', ':6.2f', utils.Summary.AVERAGE)
     bleu4 = utils.AverageMeter('BLEU@4', ':6.2f', utils.Summary.AVERAGE)
+    rouge1 = utils.AverageMeter('ROUGE@1', ':6.2f', utils.Summary.AVERAGE)
+    rouge2 = utils.AverageMeter('ROUGE@2', ':6.2f', utils.Summary.AVERAGE)
+    rougeL = utils.AverageMeter('ROUGE@L', ':6.2f', utils.Summary.AVERAGE)
+    rougeLsum = utils.AverageMeter('ROUGE@Lsum', ':6.2f', utils.Summary.AVERAGE)
+    cider = utils.AverageMeter('CIDER', ':6.2f', utils.Summary.AVERAGE)
 
     if gpu % world_size == 0:
         progress = utils.ProgressMeter(args.val_steps_per_epoch, [batch_time, losses], prefix=f'{prefix}: ')
@@ -680,16 +611,34 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         bleu4_score = bleu_scorers[3](all_generated_captions, all_gt_captions)
         bleu4.update(bleu4_score, 1)
 
+        rouge_scores = rouge_scorer(all_generated_captions, all_gt_captions)
+        rouge1.update(rouge_scores['rouge1_fmeasure'], 1)
+        rouge2.update(rouge_scores['rouge2_fmeasure'], 1)
+        rougeL.update(rouge_scores['rougeL_fmeasure'], 1)
+        rougeLsum.update(rouge_scores['rougeLsum_fmeasure'], 1)
+
+        cands = {idx: [pred] for idx, pred in enumerate(all_generated_captions)}
+        refs = {idx: [label] for idx, label in enumerate(all_gt_captions)}
+        cider_scores, _ = cider_scorer.compute_score(refs, cands)
+        cider.update(cider_scores['rougeLsum_fmeasure'], 1)
+
     batch_time.all_reduce()
     losses.all_reduce()
     bleu1.all_reduce()
     bleu2.all_reduce()
     bleu3.all_reduce()
     bleu4.all_reduce()
+    rouge1.all_reduce()
+    rouge2.all_reduce()
+    rougeL.all_reduce()
+    rougeLsum.all_reduce()
+    cider.all_reduce()
 
     if gpu % world_size == 0:
         progress.display_summary()
-        print(bleu1.avg, bleu2.avg, bleu3.avg, bleu4.avg)
+        print("BLEU", bleu1.avg, bleu2.avg, bleu3.avg, bleu4.avg)
+        print("ROUGE", rouge1.avg, rouge2.avg, rougeL.avg, rougeLsum.avg)
+        print("CIDER", cider.avg)
 
         run.log({f"{prefix}/total_secs_per_batch": batch_time.avg}, step=actual_step)
         run.log({f"{prefix}/loss": losses.avg}, step=actual_step)
@@ -697,17 +646,13 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         run.log({f"{prefix}/bleu2": bleu2.avg}, step=actual_step)
         run.log({f"{prefix}/bleu3": bleu3.avg}, step=actual_step)
         run.log({f"{prefix}/bleu4": bleu4.avg}, step=actual_step)
+        run.log({f"{prefix}/rouge1": rouge1.avg}, step=actual_step)
+        run.log({f"{prefix}/rouge2": rouge2.avg}, step=actual_step)
+        run.log({f"{prefix}/rougeL": rougeL.avg}, step=actual_step)
+        run.log({f"{prefix}/rougeLsum": rougeLsum.avg}, step=actual_step)
+        run.log({f"{prefix}/cider": cider.avg}, step=actual_step)
 
     return bleu4.avg
-    #rouge = evaluate.load("rouge")
-    #bleu = evaluate.load("bleu")
-    #cider_scorer = Cider()
-
-    #cands = {idx: [pred] for idx, pred in enumerate(all_generated_texts)}
-    #refs = {idx: [label] for idx, label in enumerate(all_labels)}
-    #cider_score, _ = cider_scorer.compute_score(refs, cands)
-    #rouge_results = rouge.compute(predictions=all_generated_texts, references=all_labels)
-    #bleu_results = bleu.compute(predictions=all_generated_texts, references=all_labels)
 
 
 if __name__ == "__main__":

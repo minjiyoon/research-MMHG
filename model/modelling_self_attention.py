@@ -9,6 +9,15 @@ from transformers import (
     CLIPVisionModel
 )
 
+from peft import (
+    LoraConfig,
+    PrefixTuningConfig,
+    PromptTuningInit,
+    PromptTuningConfig,
+    TaskType,
+    get_peft_model,
+)
+
 
 class TextPooler(nn.Module):
     def __init__(self, config):
@@ -38,40 +47,73 @@ class SelfAttentionModel(nn.Module):
         self.tokenizer = tokenizer
 
         if "t5" in args.model_name_or_path:
+            peft_task_type = TaskType.SEQ_2_SEQ_LM
             config = AutoConfig.from_pretrained(args.model_name_or_path)
             model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
         elif "opt" in args.model_name_or_path:
+            peft_task_type = TaskType.CAUSAL_LM
             config = AutoConfig.from_pretrained(args.model_name_or_path)
             model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
-        else
+        else:
             raise ValueError(f"SelfAttentionModel does not support {args.model_name_or_path}.")
 
-        self.lm = model
+        if args.peft_type == "none":
+            self.lm = model
+        else:
+            if args.peft_type == "lora":
+                peft_config = LoraConfig(
+                    r=args.lora_r,
+                    lora_alpha=args.lora_alpha,
+                    target_modules=["query", "value"],
+                    lora_dropout=args.lora_dropout,
+                    bias="none",
+                    modules_to_save=["lm_head"],
+                )
+            elif args.peft_type == "prefix":
+                peft_config = PrefixTuningConfig(
+                    task_type=peft_task_type,
+                    inference_mode=False,
+                    num_virtual_tokens=20
+                )
+            elif args.peft_type == "prompt":
+                peft_config = PromptTuningConfig(
+                    task_type=peft_task_type,
+                    prompt_tuning_init=PromptTuningInit.RANDOM,
+                    num_virtual_tokens=20,
+                )
+            else:
+                raise ValueError(f"SelfAttentionModel does not support {args.peft_type}.")
+            self.lm = get_peft_model(model, peft_config)
+
         self.input_embeddings = self.lm.get_input_embeddings()
 
-        # Text model processing text neighbors
-        config = AutoConfig.from_pretrained(args.text_model)
-        embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
-        self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
-        self.text_pooler = TextPooler(config)
-        self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
-        if args.position_type != "none":
-            self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+        self.text_model = None
+        if self.neighbor_mode == "embedding":
+            # Text model processing text neighbors
+            config = AutoConfig.from_pretrained(args.text_model)
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
+            self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
+            self.text_pooler = TextPooler(config)
+            self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
+            if args.position_type != "none":
+                self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
-        self.text_model.eval()
-        for name, param in self.text_model.named_parameters():
-            param.requires_grad = False
+            self.text_model.eval()
+            for name, param in self.text_model.named_parameters():
+                param.requires_grad = False
 
-        # Vision model processing image neighbors
-        embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
-        self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
-        self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
-        if args.position_type != "none":
-            self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+        self.visual_model = None
+        if self.context in ("session_all", "all"):
+            # Vision model processing image neighbors
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
+            self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
+            self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
+            if args.position_type != "none":
+                self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
-        self.visual_model.eval()
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
+            self.visual_model.eval()
+            for param in self.visual_model.parameters():
+                param.requires_grad = False
 
         # Freeze the base LM
         if self.args.freeze_lm:
@@ -117,8 +159,10 @@ class SelfAttentionModel(nn.Module):
         super(SelfAttentionModel, self).train(mode=mode)
         if self.args.freeze_lm:
             self.lm.eval()
-        self.text_model.eval()
-        self.visual_model.eval()
+        if self.text_model is not None:
+            self.text_model.eval()
+        if self.visual_model is not None:
+            self.visual_model.eval()
 
     def forward(
         self,
@@ -202,4 +246,6 @@ class SelfAttentionModel(nn.Module):
 
             return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
 
+        else:
+            raise ValueError(f"Neighbor mode: {self.neighbor_mode} and context: {self.context} are not supported.")
 
