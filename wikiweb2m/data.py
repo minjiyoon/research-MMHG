@@ -30,7 +30,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.task = args.task
         self.context = args.context
         self.decoder_only = args.decoder_only
-        self.cross_attention = args.cross_attention
+        self.neighbor_mode = args.neighbor_mode
 
         self.max_text_neighbors = args.max_text_neighbors
         self.max_image_neighbors = args.max_image_neighbors
@@ -56,7 +56,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         page_title = d['page_title'].decode()
         page_description = d['page_description'].decode()
         page_info = ', '.join([page_title, page_description])
-        return ' '.join(page_info.replace('\n', '').split())
+        return ' '.join(page_info.replace('\n', ' ').split())
 
     def get_section_info(self, section_id, d, remove_summary=True):
         section_depth = str(d['section_depth'][section_id])
@@ -67,11 +67,11 @@ class WikiWeb2M(torch.utils.data.Dataset):
         section_rest_sentence = d['section_rest_sentence'][section_id].decode()
         if remove_summary:
             section_info = ', '.join([section_rest_sentence])
-            section_info, section_summary = ' '.join(section_info.replace('\n', '').split()), ' '.join(section_summary.replace('\n', '').split())
+            section_info, section_summary = ' '.join(section_info.replace('\n', ' ').split()), ' '.join(section_summary.replace('\n', ' ').split())
             return section_info, section_summary
         else:
             section_info = ', '.join([section_summary, section_rest_sentence])
-            section_info = ' '.join(section_info.replace('\n', '').split())
+            section_info = ' '.join(section_info.replace('\n', ' ').split())
             return section_info
 
     def get_section_images(self, page_id, section_id, d):
@@ -87,14 +87,14 @@ class WikiWeb2M(torch.utils.data.Dataset):
                     img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
                     section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
                     section_caption = image_captions[section_id][image_id].decode()
-                    return section_image, ' '.join(section_caption.replace('\n', '').split())
+                    return section_image, ' '.join(section_caption.replace('\n', ' ').split())
                 except:
                     continue
         return None, None
 
     def __getitem__(self, index):
-        if self.cross_attention:
-            return self.get_cross_attention_item(index)
+        if self.neighbor_mode == "embedding":
+            return self.get_embedding_item(index)
 
         page_id, section_id = self.id_list[index]
         d = self.df[self.df['page_id'] == page_id].iloc[0]
@@ -111,16 +111,16 @@ class WikiWeb2M(torch.utils.data.Dataset):
             image_positions = []
             if image is None:
                 inputs = "summarize: " + section_info
-                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                 images.append(torch.zeros((3,  224, 224)))
-                image_positions.append(torch.LongTensor([-1]))
             else:
                 inputs = "summarize: " + section_info + ", conext: " + image_caption
-                max_text_length = self.max_input_length - self.n_visual_tokens
-                input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                input_ids = torch.cat([input_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                 images.append(image)
-                image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
+            max_text_length = self.max_input_length - self.n_visual_tokens
+            input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            image_positions.append(input_ids.shape[0] + torch.arange(self.n_visual_tokens))
+            input_ids = torch.cat([input_ids, visual_ids], dim=0)
 
         elif self.context == "text_only":
             page_info = self.get_page_info(d)
@@ -143,16 +143,16 @@ class WikiWeb2M(torch.utils.data.Dataset):
             image_positions = []
             if section_image is None:
                 inputs = "summarize: " + section_info
-                input_ids = self.tokenizer(inputs, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                 images.append(torch.zeros((3,  224, 224)))
-                image_positions.append(torch.LongTensor([-1]))
             else:
                 inputs = "summarize: " + section_info + ", conext: " + section_caption
-                max_text_length = self.max_input_length - self.n_visual_tokens
-                input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                input_ids = torch.cat([input_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                 images.append(section_image)
-                image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
+            max_text_length = self.max_input_length - self.n_visual_tokens
+            input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            image_positions.append(input_ids.shape[0] + torch.arange(self.n_visual_tokens))
+            input_ids = torch.cat([input_ids, visual_ids], dim=0)
 
             for context_id in range(len(d['section_title'])):
                 if context_id == section_id:
@@ -161,17 +161,16 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 context_image, context_caption = self.get_section_images(page_id, context_id, d)
                 if context_image is None:
                     context = context_info
-                    context_ids = self.tokenizer(context, max_length=self.max_input_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                    input_ids = torch.cat([input_ids, context_ids], dim=0)
+                    visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                     images.append(torch.zeros((3,  224, 224)))
-                    image_positions.append(torch.LongTensor([-1]))
                 else:
                     context = context_info + context_caption
-                    max_text_length = self.max_input_length - self.n_visual_tokens
-                    context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                    input_ids = torch.cat([input_ids, context_ids, torch.LongTensor(self.n_visual_tokens * [-1])], dim=0)
+                    visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                     images.append(context_image)
-                    image_positions.append(torch.LongTensor([input_ids.shape[0] - self.n_visual_tokens]))
+                max_text_length = self.max_input_length - input_ids.shape[0] - self.n_visual_tokens
+                context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                image_positions.append(input_ids.shape[0] + context_ids.shape[0] + torch.arange(self.n_visual_tokens))
+                input_ids = torch.cat([input_ids, context_ids, visual_ids], dim=0)
 
             if len(input_ids) > self.max_input_length:
                 input_ids = input_ids[:self.max_input_length]
@@ -196,13 +195,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         if self.context in ("section_all", "all"):
             images = torch.stack(images, dim=0)
-            image_positions = torch.stack(image_positions, dim=0)
+            image_positions = torch.cat(image_positions, dim=0)
             result["images"] = images
             result["image_positions"] = image_positions
 
         return result
 
-    def get_cross_attention_item(self, index):
+    def get_embedding_item(self, index):
         page_id, section_id = self.id_list[index]
         d = self.df[self.df['page_id'] == page_id].iloc[0]
 
@@ -210,27 +209,48 @@ class WikiWeb2M(torch.utils.data.Dataset):
         inputs = "summarize: " + section_info
         model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
 
-        labels = ", summary: " + labels
-        label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-        # Remove SOS token and add EOS token
-        label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
-        model_outputs = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
+        if self.decoder_only:
+            labels = ", summary: " + labels
+            label_ids = self.tokenizer(labels, max_length=self.max_output_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+            # Remove SOS token and add EOS token
+            label_ids = torch.cat([label_ids[1:], torch.LongTensor([self.tokenizer.eos_token_id])], dim=0)
+            model_outputs = self.tokenizer.pad({"input_ids": [label_ids]}, max_length=self.max_output_length, padding="max_length", return_tensors="pt")
+
+            result = {"input_ids": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0), \
+                    "attention_mask": torch.cat((model_inputs.attention_mask[0], model_outputs.attention_mask[0]), dim=0), \
+                    "labels": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0)}
+        else:
+            labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids[0]
+            labels_with_ignore_index = torch.LongTensor([label if label != 0 else -100 for label in labels])
+            result = {"input_ids": model_inputs.input_ids[0], "attention_mask": model_inputs.attention_mask[0], "labels": labels_with_ignore_index}
 
         # Multimodal neighbor information
         neighbor_texts = []
         neighbor_images = []
         position_texts = []
         position_images = []
+        location_texts = []
+        location_images = []
+        location = 0
 
         #(1) page information
         page_info = self.get_page_info(d)
         neighbor_texts.append(page_info)
+        position_texts.append(len(position_texts))
+        location_texts.append(location)
+        location += 1
 
         #(2) session image information
         section_image, section_caption = self.get_section_images(page_id, section_id, d)
         if section_image is not None:
             neighbor_images.append(section_image)
+            position_images.append(len(position_images))
+            location_images.append(location)
+            location += 1
             neighbor_texts.append(section_caption)
+            position_texts.append(len(position_texts))
+            location_texts.append(location)
+            location += 1
 
         #(3) rest section information
         for context_id in range(len(d['section_title'])):
@@ -239,13 +259,23 @@ class WikiWeb2M(torch.utils.data.Dataset):
             if len(neighbor_texts) < self.max_text_neighbors:
                 context_info = self.get_section_info(context_id, d, remove_summary=False)
                 neighbor_texts.append(context_info)
+                position_texts.append(len(position_texts))
+                location_texts.append(location)
+                location += 1
 
             if len(neighbor_images) < self.max_image_neighbors:
                 context_image, context_caption = self.get_section_images(page_id, context_id, d)
                 if context_image is not None:
                     neighbor_images.append(context_image)
+                    position_images.append(len(position_images))
+                    location_images.append(location)
+                    location += 1
+
                     if len(neighbor_texts) < self.max_text_neighbors:
                         neighbor_texts.append(context_caption)
+                        position_texts.append(len(position_texts))
+                        location_texts.append(location)
+                        location += 1
 
         # Increase position ids by 1 for padding_id
         position_texts = [position_id + 1 for position_id in position_texts]
@@ -254,21 +284,25 @@ class WikiWeb2M(torch.utils.data.Dataset):
         while len(neighbor_texts) < self.max_text_neighbors:
             neighbor_texts.append('')
             position_texts.append(0)
+            location_texts.append(location)
+            location += 1
+
         while len(neighbor_images) < self.max_image_neighbors:
             neighbor_images.append(torch.zeros((3,  224, 224)))
             position_images.append(0)
+            location_images.append(location)
+            location += 1
 
         #Tokenize
         neighbor_texts = self.tokenizer(neighbor_texts, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        result = {"input_ids": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0), \
-                  "attention_mask": torch.cat((model_inputs.attention_mask[0], model_outputs.attention_mask[0]), dim=0), \
-                  "labels": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0), \
-                  "neighbor_input_ids": neighbor_texts.input_ids,
-                  "neighbor_attention_mask": neighbor_texts.attention_mask,
-                  "neighbor_pos_ids": torch.LongTensor(position_texts),
-                  "neighbor_images": torch.stack(neighbor_images, dim=0),
-                  "neighbor_images_pos_ids": torch.LongTensor(position_images)
-                }
+        result["neighbor_input_ids"] = neighbor_texts.input_ids,
+        result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
+        result["neighbor_pos_ids"] = torch.LongTensor(position_texts),
+        result["text_locations"] = torch.LongTensor(location_texts),
+        result["neighbor_images"] = torch.stack(neighbor_images, dim=0),
+        result["neighbor_images_pos_ids"] = torch.LongTensor(position_images)
+        result["image_locations"] = torch.LongTensor(location_images),
+
         return result
 
 

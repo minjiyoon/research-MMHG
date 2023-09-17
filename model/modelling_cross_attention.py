@@ -1187,50 +1187,57 @@ class TextPooler(nn.Module):
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
-class MPT(nn.Module):
+
+class CrossAttentionModel(nn.Module):
     def __init__(self, args, tokenizer):
         super().__init__()
 
         self.args = args
+        self.context = args.context
+        self.n_text_tokens = args.n_text_tokens
+        self.n_visual_tokens = args.n_visual_tokens
         self.tokenizer = tokenizer
-        self.initialize_mpt(args)
 
+        self.initialize_lm(args)
+        self.input_embeddings = self.lm.get_input_embeddings()
+
+        # Text model processing text neighbors
+        config = AutoConfig.from_pretrained(args.text_model)
+        embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
+        self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
+        self.text_pooler = TextPooler(config)
+        self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
+        if args.position_type != "none":
+            self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+
+        self.text_model.eval()
+        for name, param in self.text_model.named_parameters():
+            param.requires_grad = False
+
+        # Vision model processing image neighbors
+        embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
+        self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
+        self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
+        if args.position_type != "none":
+            self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+
+        self.visual_model.eval()
+        for param in self.visual_model.parameters():
+            param.requires_grad = False
+
+        # Freeze the base LM
         if self.args.freeze_lm:
-            self.lm.eval()
             print("Freezing the LM.")
+            self.lm.eval()
             for param in self.lm.parameters():
                 param.requires_grad = False
         else:
             self.lm.train()
 
-        self.input_embeddings = self.lm.get_input_embeddings()
-
-        if self.args.random_flag is False:
-            hidden_size = self.lm.config.hidden_size
-            config = AutoConfig.from_pretrained(args.text_model)
-            self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
-            self.text_pooler = TextPooler(config)
-            self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, hidden_size)
-            if args.text_position_type != "none":
-                self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, hidden_size) # + 1 for padding neighbors
-
-            self.text_model.eval()
-            for name, param in self.text_model.named_parameters():
-                param.requires_grad = False
-
-        #self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
-        #self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, hidden_size)
-        #self.visual_model.eval()
-
-        #for param in self.visual_model.parameters():
-        #    param.requires_grad = False
-
-    def initialize_mpt(self, args):
+    def initialize_lm(self, args):
         opt_config = AutoConfig.from_pretrained(args.model_name_or_path)
         opt_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=opt_config)
-        if args.random_flag:
-            self.lm = opt_model
-            return
+
         mpt_config = MPTConfig(args, opt_config)
         mpt_model = MPTForCausalLM(mpt_config)
 
@@ -1261,47 +1268,84 @@ class MPT(nn.Module):
         outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
         encoder_outputs = self.text_pooler(outputs.last_hidden_state)
         text_embs = self.text_embeddings(encoder_outputs)
-        text_embs = text_embs.reshape(batch_size, neighbor_num, -1)
 
-        if pos_ids is None:
-            return text_embs
-        else:
-            return text_embs + self.text_position_embeddings(pos_ids)
+        if pos_ids is not None:
+            pos_ids = pos_ids.reshape(-1)
+            text_embs = text_embs + self.text_position_embeddings(pos_ids)
 
-    def get_visual_embs(self, pixel_values: torch.FloatTensor):
+        text_embs = text_embs.reshape(text_embs.shape[0], self.n_text_tokens, -1)
+        return text_embs.reshape(batch_size, neighbor_num, self.n_text_tokens, -1)
+
+    def get_visual_embs(self, pixel_values, pos_ids=None):
+        batch_size, neighbor_num, pixel, width, height = pixel_values.shape
+        pixel_values = pixel_values.reshape(-1, pixel, width, height)
+
         outputs = self.visual_model(pixel_values)
         encoder_outputs = outputs.pooler_output
         visual_embs = self.visual_embeddings(encoder_outputs)
-        return visual_embs
+
+        if pos_ids is not None:
+            pos_ids = pos_ids.reshape(-1)
+            visual_embs = visual_embs + self.visual_position_embeddings(pos_ids)
+
+        visual_embs = visual_embs.reshape(visual_embs.shape[0], self.n_visual_tokens, -1)
+        return visual_embs.reshape(batch_size, neighbor_num, self.n_visual_tokens, -1)
 
     def train(self, mode=True):
-        super(MPT, self).train(mode=mode)
-        # Overwrite train() to ensure frozen models remain frozen.
+        super(SelfAttentionModel, self).train(mode=mode)
         if self.args.freeze_lm:
             self.lm.eval()
-        if self.args.random_flag is False:
-            self.text_model.eval()
-        #self.visual_model.eval()
+        self.text_model.eval()
+        self.visual_model.eval()
 
-    def forward(self, input_ids, attention_mask, labels, neighbor_input_ids=None, neighbor_attention_mask=None, neighbor_pos_ids=None):
-        if neighbor_input_ids is None:
-            neighbor_embeds = None
-            neighbor_attention_mask = None
-        else:
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        labels,
+        images=None,
+        image_positions=None,
+        neighbor_input_ids=None,
+        neighbor_attention_mask=None,
+        neighbor_pos_ids=None,
+        text_locations=None,
+        neighbor_images=None,
+        neighbor_images_pos_ids=None,
+        image_locations=None
+    ):
+        if self.context in ("session", "text_only"):
+            batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
             neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
-            neighbor_attention_mask = neighbor_attention_mask[:, :, 0]
+            neighbor_embeds = neighbor_embeds.reshape(batch_size, neighbor_num * self.n_text_tokens, -1)
+            neighbor_attention_mask = neighbor_pos_ids > 0
+            neighbor_attention_mask = torch.repeat_interleave(neighbor_attention_mask, repeats=self.n_text_tokens, dim=1)
 
-        if self.args.random_flag:
-            return self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        if self.context in ("session_all", "all"):
+            text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
+            batch_size, text_neighbor_num, n_tokens, hidden_dim = text_embeds.shape
+            text_attention_mask = neighbor_pos_ids > 0
+            text_attention_mask = text_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_text_tokens)
 
-        if self.args.lora_type == "gill":
-            input_embs = self.input_embeddings(input_ids)
-            input_embs = torch.cat((neighbor_embs, input_embeds), dim=1)
-            attention_mask = torch.cat((neighbor_attention_mask, attention_mask), dim=1)
-            labels = torch.cat((-100 * torch.ones_like(neighbor_embs), labels), dim=1)
-            output = self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
-        else:
-            output = self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
-                        neighbor_embeds=neighbor_embeds, neighbor_attention_mask=neighbor_attention_mask)
+            visual_embeds = self.get_visual_embs(neighbor_images, neighbor_images_pos_ids)
+            batch_size, visual_neighbor_num, n_tokens, hidden_dim = visual_embeds.shape
+            visual_attention_mask = neighbor_images_pos_ids > 0
+            visual_attention_mask = visual_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_visual_tokens)
 
-            return output
+            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim))
+            neighbor_embeds[batch_idx, text_locations] = text_embeds
+            neighbor_embeds[batch_idx, image_locations] = text_embeds
+            neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
+
+            total_neighbor_num = text_neighbor_num + visual_neighbor_num
+            neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens))
+            neighbor_attention_mask[batch_idx, text_locations] = text_attention_mask
+            neighbor_attention_mask[batch_idx, image_locations] = visual_attention_mask
+            neighbor_attention_mask = neighbor_attention_mask.reshape(batch_size, -1)
+
+        output = self.lm(input_ids=input_ids,
+                         attention_mask=attention_mask,
+                         labels=labels,
+                         neighbor_embeds=neighbor_embeds,
+                         neighbor_attention_mask=neighbor_attention_mask)
+
+        return output

@@ -17,6 +17,7 @@
 """ Finetuning summary generation models"""
 import json
 import os
+import random
 import sys
 import tqdm
 import wandb
@@ -209,8 +210,11 @@ class Arguments:
     freeze_lm: Optional[bool] = field(
         default=False, metadata={"help": "evaluate model on validation set."}
     )
+    neighbor_mode: str = field(
+        default="raw", metadata={"help": "position id type for text neighbors"}
+    )
     max_text_neighbors: int = field(
-        default=5, metadata={"help": "maximum number of text neighbors"}
+        default=11, metadata={"help": "maximum number of text neighbors"}
     )
     max_image_neighbors: int = field(
         default=5, metadata={"help": "maximum number of image neighbors"}
@@ -234,9 +238,6 @@ class Arguments:
     lora_dropout: float = field(
         default=0.0, metadata={"help": "lora dropout rate"}
     )
-    random_flag: Optional[bool] = field(
-        default=False, metadata={"help": "evaluate model on validation set."}
-    )
 
 
 def main():
@@ -244,20 +245,15 @@ def main():
     parser = HfArgumentParser((Arguments))
     args = parser.parse_args_into_dataclasses()[0]
 
-    if args.duplicate_encoding is False and args.position_type != "no_position":
-        raise ValueError(
-                f"duplicate_encoding: {args.duplicate_encoding} and "
-                + f"position_type: {args.position_type} cannot be set together"
-            )
-
     i = 0
-    log_dir = os.path.join(args.log_dir, args.wandb_run)
+    log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
     while os.path.exists(log_dir):
         i += 1
         log_dir = os.path.join(args.log_dir, f'{args.wandb_run}_{i}')
     os.makedirs(log_dir)
     args.save_dir = os.path.join(log_dir, 'ckpt.pth.tar')
 
+    # Logging
     combined_args = {**vars(args)}
     with open(os.path.join(log_dir, f'args.json'), 'w') as wf:
         json.dump(combined_args, wf, indent=4)
@@ -289,13 +285,13 @@ def main_worker(gpu, world_size, args, log_dir, run):
     dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:1337', world_size=world_size, rank=gpu)
 
     # Prepare pretrained model
-    if args.context in ("section_all", "all"):
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        model = T5Image(args, tokenizer)
-    elif "t5" in args.model_name_or_path:
+    if "t5" in args.model_name_or_path:
         config = AutoConfig.from_pretrained(args.model_name_or_path)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
-        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
+        if args.context in ("section_all", "all"):
+            model = T5Image(args, tokenizer)
+        else:
+            model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, config=config)
     elif "opt" in args.model_name_or_path:
         args.decoder_only = True
         config = AutoConfig.from_pretrained(args.model_name_or_path)
