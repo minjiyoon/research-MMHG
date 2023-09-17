@@ -15,13 +15,13 @@ ulimit -c unlimited
 export WANDB_WATCH=false
 export PYTHONPATH=.
 
-#MODEL_NAME='t5-base'
+MODEL_NAME='t5-base'
 #MODEL_NAME='google/flan-t5-base'
 #MODEL_NAME='google/long-t5-local-base'
 #MODEL_NAME='facebook/opt-350m'
-MODEL_NAME='facebook/mpt-125m'
+#MODEL_NAME='facebook/mpt-125m'
 TASK='section'
-CONTEXT='text_only'
+CONTEXT='section_only'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
@@ -29,10 +29,7 @@ python language_modelling/run_generation.py \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
-    --text_position_type sequence \
-    --max_text_neighbors 12 \
-    --num_neighbor_layers 6 \
-    --lora_type none \
+    --peft_type none \
     --max_input_length 512 \
     --max_output_length 128 \
     --epochs 50 \

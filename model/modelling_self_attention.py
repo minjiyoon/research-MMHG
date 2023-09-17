@@ -103,7 +103,7 @@ class SelfAttentionModel(nn.Module):
                 param.requires_grad = False
 
         self.visual_model = None
-        if self.context in ("session_all", "all"):
+        if self.context in ("section_all", "all"):
             # Vision model processing image neighbors
             embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
             self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
@@ -180,10 +180,10 @@ class SelfAttentionModel(nn.Module):
         image_locations=None
     ):
 
-        if self.neighbor_mode == "raw" and self.context in ("session", "text_only"):
+        if self.neighbor_mode == "raw" and self.context in ("section_only", "text_only"):
             return self.lm(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-        elif self.neighbor_mode == "raw" and self.context in ("session_all", "all"):
+        elif self.neighbor_mode == "raw" and self.context in ("section_all", "all"):
             input_embs = self.input_embeddings(input_ids)
             visual_embs = self.get_visual_embs(images)
 
@@ -196,7 +196,7 @@ class SelfAttentionModel(nn.Module):
 
             return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
 
-        elif self.neighbor_mode == "embedding" and self.context in ("session", "text_only"):
+        elif self.neighbor_mode == "embedding" and self.context in ("section_only", "text_only"):
             batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
             neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             neighbor_embeds = neighbor_embeds.reshape(batch_size, neighbor_num * self.n_text_tokens, -1)
@@ -213,7 +213,7 @@ class SelfAttentionModel(nn.Module):
 
             return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
 
-        elif self.neighbor_mode == "embedding" and self.context in ("session_all", "all"):
+        elif self.neighbor_mode == "embedding" and self.context in ("section_all", "all"):
             text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             batch_size, text_neighbor_num, n_tokens, hidden_dim = text_embeds.shape
             text_attention_mask = neighbor_pos_ids > 0

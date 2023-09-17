@@ -859,7 +859,7 @@ class MPTDecoder(MPTPreTrainedModel):
                             hidden_states,
                             neighbor_embeds=neighbor_embeds,
                             attention_mask=attention_mask,
-                            attention_mask=neighbor_attention_mask,
+                            neighbor_attention_mask=neighbor_attention_mask,
                             layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                             past_key_value=past_key_value,
                             output_attentions=output_attentions,
@@ -1313,14 +1313,14 @@ class CrossAttentionModel(nn.Module):
         neighbor_images_pos_ids=None,
         image_locations=None
     ):
-        if self.context in ("session", "text_only"):
+        if self.context in ("section_only", "text_only"):
             batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
             neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             neighbor_embeds = neighbor_embeds.reshape(batch_size, neighbor_num * self.n_text_tokens, -1)
             neighbor_attention_mask = neighbor_pos_ids > 0
             neighbor_attention_mask = torch.repeat_interleave(neighbor_attention_mask, repeats=self.n_text_tokens, dim=1)
 
-        if self.context in ("session_all", "all"):
+        if self.context in ("section_all", "all"):
             text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             batch_size, text_neighbor_num, n_tokens, hidden_dim = text_embeds.shape
             text_attention_mask = neighbor_pos_ids > 0
