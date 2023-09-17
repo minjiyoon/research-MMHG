@@ -312,9 +312,9 @@ class DataParser():
         headers = {"User-Agent": "research (https://www.cs.cmu.edu/; minjiy@cs.cmu.edu)"}
 
         for page_id, d in enumerate(self.dataset):
-            if page_id < 100000:
+            if page_id < 250000:
                 continue
-            if page_id == 200000:
+            if page_id == 300000:
                 break
             if page_id % 1000 == 0:
                 print(page_id, 'have processed...')
@@ -350,7 +350,8 @@ class DataParser():
                     try:
                         img = Image.open(file_name)
                     except:
-                        os.remove(file_name)
+                        if os.path.exists(file_name):
+                            os.remove(file_name)
                         another_image = True
                         continue
 
