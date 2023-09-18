@@ -619,9 +619,9 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         rougeLsum.update(rouge_scores['rougeLsum_fmeasure'], 1)
 
         cands = {idx: [pred] for idx, pred in enumerate(all_generated_captions)}
-        refs = {idx: [label] for idx, label in enumerate(all_gt_captions)}
-        cider_scores, _ = cider_scorer.compute_score(refs, cands)
-        cider.update(cider_scores['rougeLsum_fmeasure'], 1)
+        refs = {idx: label for idx, label in enumerate(all_gt_captions)}
+        cider_score, _ = cider_scorer.compute_score(refs, cands)
+        cider.update(cider_score, 1)
 
     batch_time.all_reduce()
     losses.all_reduce()
