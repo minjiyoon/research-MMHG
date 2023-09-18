@@ -188,8 +188,16 @@ class SelfAttentionModel(nn.Module):
             visual_embs = self.get_visual_embs(images)
 
             batch_size, seq_len, hidden_dim = input_embs.shape
-            batch_idx = torch.arange(batch_size)[:, None]
-            input_embs[batch_idx, image_positions] = visual_embs.reshape(batch_size, -1, hidden_dim)
+            if self.context == "section_all":
+                batch_idx = torch.arange(batch_size)[:, None]
+                input_embs[batch_idx, image_positions] = visual_embs.reshape(batch_size, -1, hidden_dim)
+            else:
+                for batch_idx in range(batch_size):
+                    for image_idx in range(images.shape[1]):
+                        image_position = image_positions[self.n_visual_tokens * image_idx: self.n_visudal_tokens * (image_idx + 1)]
+                        if image_position == -1 * torch.ones((self.n_visual_tokens)):
+                            continue
+                        input_embs[batch_idx, image_position] = visual_embs[batch_idx].reshape(-1, hidden_dim)
 
             if self.decoder_only:
                 labels[batch_idx, image_positions] = -100

@@ -159,18 +159,31 @@ class WikiWeb2M(torch.utils.data.Dataset):
                     continue
                 context_info = self.get_section_info(context_id, d, remove_summary=False)
                 context_image, context_caption = self.get_section_images(page_id, context_id, d)
-                if context_image is None:
-                    context = context_info
-                    visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
-                    images.append(torch.zeros((3,  224, 224)))
+                if len(images) < self.max_image_neighbors:
+                    max_text_length = self.max_input_length - input_ids.shape[0] - self.n_visual_tokens
+                    if max_text_length <= 0:
+                        break
+                    if context_image is None:
+                        context = context_info
+                        visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
+                        images.append(torch.zeros((3,  224, 224)))
+                    else:
+                        context = context_info + context_caption
+                        visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
+                        images.append(context_image)
+                    context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                    image_positions.append(input_ids.shape[0] + context_ids.shape[0] + torch.arange(self.n_visual_tokens))
+                    input_ids = torch.cat([input_ids, context_ids, visual_ids], dim=0)
                 else:
-                    context = context_info + context_caption
-                    visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
-                    images.append(context_image)
-                max_text_length = self.max_input_length - input_ids.shape[0] - self.n_visual_tokens
-                context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
-                image_positions.append(input_ids.shape[0] + context_ids.shape[0] + torch.arange(self.n_visual_tokens))
-                input_ids = torch.cat([input_ids, context_ids, visual_ids], dim=0)
+                    max_text_length = self.max_input_length - input_ids.shape[0]
+                    if max_text_length <= 0:
+                        break
+                    context_ids = self.tokenizer(context_info, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
+                    input_ids = torch.cat([input_ids, context_ids], dim=0)
+
+            while len(images) < self.max_image_neighbors:
+                images.append(torch.zeros((3,  224, 224)))
+                image_positions.append(-1 * torch.ones((self.n_visual_tokens)))
 
             if len(input_ids) > self.max_input_length:
                 input_ids = input_ids[:self.max_input_length]
