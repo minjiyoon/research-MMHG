@@ -114,7 +114,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                 images.append(torch.zeros((3,  224, 224)))
             else:
-                inputs = "summarize: " + section_info + ", conext: " + image_caption
+                inputs = "summarize: " + section_info + ", context: " + image_caption
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                 images.append(image)
             max_text_length = self.max_input_length - self.n_visual_tokens
@@ -146,7 +146,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                 images.append(torch.zeros((3,  224, 224)))
             else:
-                inputs = "summarize: " + section_info + ", conext: " + section_caption
+                inputs = "summarize: " + section_info + ", context: " + section_caption
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                 images.append(section_image)
             max_text_length = self.max_input_length - self.n_visual_tokens
