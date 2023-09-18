@@ -26,6 +26,7 @@ DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
     --dataset wikiweb2m \
+    --image_path /data/minji \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \

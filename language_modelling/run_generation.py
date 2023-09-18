@@ -91,6 +91,9 @@ class Arguments:
     dataset: Optional[str] = field(
         default='wikiweb2m', metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
+    image_path: Optional[str] = field(
+        default='/projects/rsalakhugroup/minjiy', metadata={"help": "path to the image dataset"}
+    )
     task: Optional[str] = field(
         default='section_summarization', metadata={"help": "The domain of OAG datasets"}
     )

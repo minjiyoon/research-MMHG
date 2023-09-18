@@ -25,7 +25,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
     def __init__(self, args, df, id_list, tokenizer, visual_feature_extractor_model=None):
         self.path = './wikiweb2m/raw/'
-        self.image_path = '/projects/rsalakhugroup/minjiy/images/'
+        self.image_path = f'{args.image_path}/images/'
 
         self.task = args.task
         self.context = args.context
