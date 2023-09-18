@@ -105,7 +105,7 @@ class SelfAttentionModel(nn.Module):
         self.visual_model = None
         if self.context in ("section_all", "all"):
             # Vision model processing image neighbors
-            embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_visual_tokens
             self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
             self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
             if args.position_type != "none":
@@ -194,7 +194,7 @@ class SelfAttentionModel(nn.Module):
             if self.decoder_only:
                 labels[batch_idx, image_positions] = -100
 
-            return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
+            return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         elif self.neighbor_mode == "embedding" and self.context in ("section_only", "text_only"):
             batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
@@ -211,7 +211,7 @@ class SelfAttentionModel(nn.Module):
                 neighbor_labels = -100 * torch.ones((batch_size, neighbor_num * self.n_text_tokens)).to(labels.device)
                 labels = torch.cat((labels, neighbor_labels), dim=1)
 
-            return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
+            return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         elif self.neighbor_mode == "embedding" and self.context in ("section_all", "all"):
             text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
@@ -244,7 +244,7 @@ class SelfAttentionModel(nn.Module):
                 neighbor_labels = -100 * torch.ones((batch_size, total_neighbor_num * n_tokens)).to(labels.device)
                 labels = torch.cat((labels, neighbor_labels), dim=1)
 
-            return self.lm(input_embs=input_embs, attention_mask=attention_mask, labels=labels)
+            return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         else:
             raise ValueError(f"Neighbor mode: {self.neighbor_mode} and context: {self.context} are not supported.")

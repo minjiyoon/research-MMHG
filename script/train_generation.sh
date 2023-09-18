@@ -21,7 +21,7 @@ MODEL_NAME='t5-base'
 #MODEL_NAME='facebook/opt-350m'
 #MODEL_NAME='facebook/mpt-125m'
 TASK='section'
-CONTEXT='section_only'
+CONTEXT='section_all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
