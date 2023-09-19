@@ -225,19 +225,19 @@ class SelfAttentionModel(nn.Module):
             text_attention_mask = neighbor_pos_ids > 0
             text_attention_mask = text_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_text_tokens)
 
-
             visual_embeds = self.get_visual_embs(neighbor_images, neighbor_images_pos_ids)
             batch_size, visual_neighbor_num, n_tokens, hidden_dim = visual_embeds.shape
             visual_attention_mask = neighbor_images_pos_ids > 0
             visual_attention_mask = visual_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_visual_tokens)
 
-            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim))
+            batch_idx = torch.arange(batch_size)[:, None]
+            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
             neighbor_embeds[batch_idx, text_locations] = text_embeds
-            neighbor_embeds[batch_idx, image_locations] = text_embeds
+            neighbor_embeds[batch_idx, image_locations] = visual_embeds
             neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
 
             total_neighbor_num = text_neighbor_num + visual_neighbor_num
-            neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens))
+            neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens)).bool().to(neighbor_attention_mask.device)
             neighbor_attention_mask[batch_idx, text_locations] = text_attention_mask
             neighbor_attention_mask[batch_idx, image_locations] = visual_attention_mask
             neighbor_attention_mask = neighbor_attention_mask.reshape(batch_size, -1)
