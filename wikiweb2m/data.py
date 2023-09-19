@@ -199,7 +199,6 @@ class WikiWeb2M(torch.utils.data.Dataset):
             result = {"input_ids": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0),\
                       "attention_mask": torch.cat((model_inputs.attention_mask[0], model_outputs.attention_mask[0]), dim=0),\
                       "labels": torch.cat((model_inputs.input_ids[0], model_outputs.input_ids[0]), dim=0)}
-
         else:
             model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
             labels = self.tokenizer(labels, max_length=self.max_output_length, padding="max_length", truncation=True, return_tensors="pt").input_ids[0]
@@ -208,7 +207,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         if self.context in ("section_all", "all"):
             images = torch.stack(images, dim=0)
-            image_positions = torch.cat(image_positions, dim=0)
+            image_positions = torch.cat(image_positions, dim=0).long()
             result["images"] = images
             result["image_positions"] = image_positions
 
