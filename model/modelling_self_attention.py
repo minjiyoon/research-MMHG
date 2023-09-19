@@ -95,8 +95,7 @@ class SelfAttentionModel(nn.Module):
             self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
             self.text_pooler = TextPooler(config)
             self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
-            if args.position_type != "none":
-                self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+            self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
             self.text_model.eval()
             for name, param in self.text_model.named_parameters():
@@ -108,8 +107,7 @@ class SelfAttentionModel(nn.Module):
             embedding_dim = self.input_embeddings.embedding_dim * args.n_visual_tokens
             self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
             self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
-            if args.position_type != "none":
-                self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+            self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
             self.visual_model.eval()
             for param in self.visual_model.parameters():

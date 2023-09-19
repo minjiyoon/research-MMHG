@@ -441,6 +441,9 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
     end = time.time()
     for i, batch in enumerate(train_loader):
         data_time.update(time.time() - end)
+        for k, v in batch.items():
+            if type(v) == list:
+                batch[k] = v[0]
         batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
         forward_start = time.time()
         outputs = model(**batch)
@@ -536,6 +539,9 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
         max_to_display = 5
 
         for i, batch in enumerate(val_loader):
+            for k, v in batch.items():
+                if type(v) == list:
+                    batch[k] = v[0]
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
 
             outputs = model(**batch)

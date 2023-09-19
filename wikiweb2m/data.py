@@ -241,45 +241,47 @@ class WikiWeb2M(torch.utils.data.Dataset):
         location += 1
 
         #(2) session image information
-        section_image, section_caption = self.get_section_images(page_id, section_id, d)
-        if section_image is not None:
-            neighbor_images.append(section_image)
-            position_images.append(len(position_images))
-            location_images.append(location)
-            location += 1
-            neighbor_texts.append(section_caption)
-            position_texts.append(len(position_texts))
-            location_texts.append(location)
-            location += 1
-
-        #(3) rest section information
-        for context_id in range(len(d['section_title'])):
-            if context_id == section_id:
-                continue
-            if len(neighbor_texts) < self.max_text_neighbors:
-                context_info = self.get_section_info(context_id, d, remove_summary=False)
-                neighbor_texts.append(context_info)
+        if self.context != "text_only":
+            section_image, section_caption = self.get_section_images(page_id, section_id, d)
+            if section_image is not None:
+                neighbor_images.append(section_image)
+                position_images.append(len(position_images))
+                location_images.append(location)
+                location += 1
+                neighbor_texts.append(section_caption)
                 position_texts.append(len(position_texts))
                 location_texts.append(location)
                 location += 1
 
-            if len(neighbor_images) < self.max_image_neighbors:
-                context_image, context_caption = self.get_section_images(page_id, context_id, d)
-                if context_image is not None:
-                    neighbor_images.append(context_image)
-                    position_images.append(len(position_images))
-                    location_images.append(location)
+        #(3) rest section information
+        if self.context != "section_all":
+            for context_id in range(len(d['section_title'])):
+                if context_id == section_id:
+                    continue
+                if len(neighbor_texts) < self.max_text_neighbors:
+                    context_info = self.get_section_info(context_id, d, remove_summary=False)
+                    neighbor_texts.append(context_info)
+                    position_texts.append(len(position_texts))
+                    location_texts.append(location)
                     location += 1
 
-                    if len(neighbor_texts) < self.max_text_neighbors:
-                        neighbor_texts.append(context_caption)
-                        position_texts.append(len(position_texts))
-                        location_texts.append(location)
-                        location += 1
+                if self.context != "text_only":
+                    if len(neighbor_images) < self.max_image_neighbors:
+                        context_image, context_caption = self.get_section_images(page_id, context_id, d)
+                        if context_image is not None:
+                            neighbor_images.append(context_image)
+                            position_images.append(len(position_images))
+                            location_images.append(location)
+                            location += 1
+
+                            if len(neighbor_texts) < self.max_text_neighbors:
+                                neighbor_texts.append(context_caption)
+                                position_texts.append(len(position_texts))
+                                location_texts.append(location)
+                                location += 1
 
         # Increase position ids by 1 for padding_id
         position_texts = [position_id + 1 for position_id in position_texts]
-        position_images = [position_id + 1 for position_id in position_images]
         # Pad
         while len(neighbor_texts) < self.max_text_neighbors:
             neighbor_texts.append('')
@@ -287,11 +289,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
             location_texts.append(location)
             location += 1
 
-        while len(neighbor_images) < self.max_image_neighbors:
-            neighbor_images.append(torch.zeros((3,  224, 224)))
-            position_images.append(0)
-            location_images.append(location)
-            location += 1
+        if self.context != "text_only":
+            position_images = [position_id + 1 for position_id in position_images]
+            while len(neighbor_images) < self.max_image_neighbors:
+                neighbor_images.append(torch.zeros((3,  224, 224)))
+                position_images.append(0)
+                location_images.append(location)
+                location += 1
 
         #Tokenize
         neighbor_texts = self.tokenizer(neighbor_texts, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
@@ -299,9 +303,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
         result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
         result["neighbor_pos_ids"] = torch.LongTensor(position_texts),
         result["text_locations"] = torch.LongTensor(location_texts),
-        result["neighbor_images"] = torch.stack(neighbor_images, dim=0),
-        result["neighbor_images_pos_ids"] = torch.LongTensor(position_images)
-        result["image_locations"] = torch.LongTensor(location_images),
+        if self.context != "text_only":
+            result["neighbor_images"] = torch.stack(neighbor_images, dim=0),
+            result["neighbor_images_pos_ids"] = torch.LongTensor(position_images)
+            result["image_locations"] = torch.LongTensor(location_images),
 
         return result
 
