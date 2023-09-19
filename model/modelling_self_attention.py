@@ -194,6 +194,8 @@ class SelfAttentionModel(nn.Module):
             else:
                 for batch_idx in range(batch_size):
                     for image_idx in range(images.shape[1]):
+                        if self.n_visual_tokens * (image_idx + 1) - 1 >= image_positions[batch_idx].shape[0]:
+                            print(image_idx, images.shape, image_positions.shape)
                         image_position = image_positions[batch_idx][self.n_visual_tokens * image_idx: self.n_visual_tokens * (image_idx + 1)]
                         if image_position.sum() == -1 * self.n_visual_tokens:
                             continue
