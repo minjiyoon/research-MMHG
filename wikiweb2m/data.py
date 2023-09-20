@@ -221,7 +221,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         inputs = "summarize: " + section_info
         total_neighbor_tokens = self.max_text_neighbors * self.n_text_tokens + self.max_image_neighbors * self.n_visual_tokens
         max_text_length = self.max_input_length - total_neighbor_tokens
-        input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt")
+        input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
         model_inputs = self.tokenizer.pad({"input_ids": [input_ids]}, max_length=self.max_input_length, padding="max_length", return_tensors="pt")
 
         if self.decoder_only:
@@ -314,8 +314,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         #Tokenize
         neighbor_texts = self.tokenizer(neighbor_texts, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        result["neighbor_input_ids"] = neighbor_texts.input_ids,
-        result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
+        result["neighbor_input_ids"] = neighbor_texts.input_ids[:, 1:],
+        result["neighbor_attention_mask"] = neighbor_texts.attention_mask[:, 1:],
         result["neighbor_pos_ids"] = torch.LongTensor(position_texts),
         result["text_locations"] = torch.LongTensor(location_texts),
         if self.context != "text_only":
