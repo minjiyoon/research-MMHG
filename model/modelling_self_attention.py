@@ -189,16 +189,19 @@ class SelfAttentionModel(nn.Module):
             if self.context == "section_all":
                 batch_idx = torch.arange(batch_size)[:, None]
                 input_embs[batch_idx, image_positions] = visual_embs.reshape(batch_size, -1, hidden_dim)
+                if self.decoder_only:
+                    labels[batch_idx, image_positions] = -100
             else:
                 for batch_idx in range(batch_size):
                     for image_idx in range(images.shape[1]):
-                        image_position = image_positions[self.n_visual_tokens * image_idx: self.n_visudal_tokens * (image_idx + 1)]
-                        if image_position == -1 * torch.ones((self.n_visual_tokens)):
+                        if self.n_visual_tokens * (image_idx + 1) - 1 >= image_positions[batch_idx].shape[0]:
+                            print(image_idx, images.shape, image_positions.shape)
+                        image_position = image_positions[batch_idx][self.n_visual_tokens * image_idx: self.n_visual_tokens * (image_idx + 1)]
+                        if image_position.sum() == -1 * self.n_visual_tokens:
                             continue
-                        input_embs[batch_idx, image_position] = visual_embs[batch_idx].reshape(-1, hidden_dim)
-
-            if self.decoder_only:
-                labels[batch_idx, image_positions] = -100
+                        input_embs[batch_idx, image_position] = visual_embs[batch_idx, image_idx]
+                        if self.decoder_only:
+                            labels[batch_idx, image_position] = -100
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
@@ -210,12 +213,12 @@ class SelfAttentionModel(nn.Module):
             neighbor_attention_mask = torch.repeat_interleave(neighbor_attention_mask, repeats=self.n_text_tokens, dim=1)
 
             input_embs = self.input_embeddings(input_ids)
-            input_embs = torch.cat((input_embs, neighbor_embeds), dim=1)
-            attention_mask = torch.cat((attention_mask, neighbor_attention_mask), dim=1)
+            input_embs[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_embeds
+            attention_mask[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_attention_mask
 
             if self.decoder_only:
                 neighbor_labels = -100 * torch.ones((batch_size, neighbor_num * self.n_text_tokens)).to(labels.device)
-                labels = torch.cat((labels, neighbor_labels), dim=1)
+                labels[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_labels.long()
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
@@ -231,25 +234,26 @@ class SelfAttentionModel(nn.Module):
             visual_attention_mask = visual_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_visual_tokens)
 
             batch_idx = torch.arange(batch_size)[:, None]
-            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
+            total_neighbor_num = text_neighbor_num + visual_neighbor_num
+            neighbor_embeds = torch.zeros((batch_size, total_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
             neighbor_embeds[batch_idx, text_locations] = text_embeds
             neighbor_embeds[batch_idx, image_locations] = visual_embeds
             neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
 
-            total_neighbor_num = text_neighbor_num + visual_neighbor_num
             neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens)).bool().to(neighbor_attention_mask.device)
             neighbor_attention_mask[batch_idx, text_locations] = text_attention_mask
             neighbor_attention_mask[batch_idx, image_locations] = visual_attention_mask
             neighbor_attention_mask = neighbor_attention_mask.reshape(batch_size, -1)
 
+            neighbor_start = self.args.max_input_length - total_neighbor_num * n_tokens
+            neighbor_end = self.args.max_input_length
             input_embs = self.input_embeddings(input_ids)
-            input_embs = torch.cat((input_embs, neighbor_embeds), dim=1)
-            attention_mask = torch.cat((attention_mask, neighbor_attention_mask), dim=1)
+            input_embs[:, neighbor_start:neighbor_end] = neighbor_embeds
+            attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 
             if self.decoder_only:
                 neighbor_labels = -100 * torch.ones((batch_size, total_neighbor_num * n_tokens)).to(labels.device)
-                labels = torch.cat((labels, neighbor_labels), dim=1).long()
-
+                labels[:, neighbor_start:neighbor_end] = neighbor_labels.long()
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         else:
