@@ -219,7 +219,9 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         section_info, labels = self.get_section_info(section_id, d, remove_summary=True)
         inputs = "summarize: " + section_info
-        model_inputs = self.tokenizer(inputs, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
+        total_neighbor_tokens = self.max_text_neighbors * self.n_text_tokens + self.max_image_neighbors * self.n_visual_tokens
+        max_text_length = self.max_input_length - total_neighbor_tokens
+        model_inputs = self.tokenizer(inputs, max_length=max_text_length, padding="max_length", truncation=True, return_tensors="pt")
 
         if self.decoder_only:
             labels = ", summary: " + labels

@@ -15,11 +15,11 @@ ulimit -c unlimited
 export WANDB_WATCH=false
 export PYTHONPATH=.
 
-MODEL_NAME='t5-base'
+#MODEL_NAME='t5-base'
 #MODEL_NAME='google/flan-t5-base'
 #MODEL_NAME='google/long-t5-local-base'
 #MODEL_NAME='facebook/opt-350m'
-#MODEL_NAME='facebook/mpt-125m'
+MODEL_NAME='facebook/opt-125m'
 TASK='section'
 CONTEXT='section_all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
@@ -27,7 +27,6 @@ DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 python language_modelling/run_generation.py \
     --dataset wikiweb2m \
     --neighbor_mode embedding \
-    --image_path /data/minji \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
@@ -37,7 +36,7 @@ python language_modelling/run_generation.py \
     --epochs 50 \
     --steps_per_epoch 10000 \
     --val_steps_per_epoch 400 \
-    --learning_rate 5e-5 \
+    --learning_rate 1e-4 \
     --per_device_train_batch_size 2 \
     --per_device_val_batch_size 2 \
     --dataloader_num_workers 8 \
