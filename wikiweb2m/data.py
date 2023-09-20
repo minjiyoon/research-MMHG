@@ -314,8 +314,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
 
         #Tokenize
         neighbor_texts = self.tokenizer(neighbor_texts, max_length=self.max_input_length, padding="max_length", truncation=True, return_tensors="pt")
-        result["neighbor_input_ids"] = neighbor_texts.input_ids[:, 1:],
-        result["neighbor_attention_mask"] = neighbor_texts.attention_mask[:, 1:],
+        result["neighbor_input_ids"] = neighbor_texts.input_ids,
+        result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
         result["neighbor_pos_ids"] = torch.LongTensor(position_texts),
         result["text_locations"] = torch.LongTensor(location_texts),
         if self.context != "text_only":
