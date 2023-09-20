@@ -316,7 +316,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     torch.cuda.set_device(gpu)
     model.cuda(gpu)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=False)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=True)
 
     if "t5" in args.model_name_or_path:
         print('Using Adafactor as the optimizer.')

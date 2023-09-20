@@ -248,7 +248,7 @@ class SelfAttentionModel(nn.Module):
 
             if self.decoder_only:
                 neighbor_labels = -100 * torch.ones((batch_size, total_neighbor_num * n_tokens)).to(labels.device)
-                labels = torch.cat((labels, neighbor_labels), dim=1)
+                labels = torch.cat((labels, neighbor_labels), dim=1).long()
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
