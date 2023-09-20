@@ -234,24 +234,26 @@ class SelfAttentionModel(nn.Module):
             visual_attention_mask = visual_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_visual_tokens)
 
             batch_idx = torch.arange(batch_size)[:, None]
-            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
+            total_neighbor_num = text_neighbor_num + visual_neighbor_num
+            neighbor_embeds = torch.zeros((batch_size, total_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
             neighbor_embeds[batch_idx, text_locations] = text_embeds
             neighbor_embeds[batch_idx, image_locations] = visual_embeds
             neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
 
-            total_neighbor_num = text_neighbor_num + visual_neighbor_num
             neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens)).bool().to(neighbor_attention_mask.device)
             neighbor_attention_mask[batch_idx, text_locations] = text_attention_mask
             neighbor_attention_mask[batch_idx, image_locations] = visual_attention_mask
             neighbor_attention_mask = neighbor_attention_mask.reshape(batch_size, -1)
 
+            neighbor_start = self.args.max_input_length - total_neighbor_num * n_tokens
+            neighbor_end = self.args.max_input_length
             input_embs = self.input_embeddings(input_ids)
-            input_embs[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_embeds
-            attention_mask[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_attention_mask
+            input_embs[:, neighbor_start:neighbor_end] = neighbor_embeds
+            attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 
             if self.decoder_only:
                 neighbor_labels = -100 * torch.ones((batch_size, total_neighbor_num * n_tokens)).to(labels.device)
-                labels[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_labels.long()
+                labels[:, neighbor_start:neighbor_end] = neighbor_labels.long()
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         else:
