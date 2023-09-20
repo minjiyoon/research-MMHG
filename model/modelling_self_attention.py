@@ -44,6 +44,7 @@ class SelfAttentionModel(nn.Module):
         self.neighbor_mode = args.neighbor_mode
         self.n_text_tokens = args.n_text_tokens
         self.n_visual_tokens = args.n_visual_tokens
+        self.n_virtual_tokens = args.n_virtual_tokens
         self.tokenizer = tokenizer
 
         if "t5" in args.model_name_or_path:
@@ -73,13 +74,13 @@ class SelfAttentionModel(nn.Module):
                 peft_config = PrefixTuningConfig(
                     task_type=peft_task_type,
                     inference_mode=False,
-                    num_virtual_tokens=20
+                    num_virtual_tokens=self.n_virtual_tokens
                 )
             elif args.peft_type == "prompt":
                 peft_config = PromptTuningConfig(
                     task_type=peft_task_type,
                     prompt_tuning_init=PromptTuningInit.RANDOM,
-                    num_virtual_tokens=20,
+                    num_virtual_tokens=self.n_virtual_tokens
                 )
             else:
                 raise ValueError(f"SelfAttentionModel does not support {args.peft_type}.")
@@ -219,8 +220,7 @@ class SelfAttentionModel(nn.Module):
             attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 
             if self.decoder_only:
-                neighbor_labels = -100 * torch.ones((batch_size, neighbor_num * self.n_text_tokens)).to(labels.device)
-                labels[:, neighbor_start:neighbor_end] = neighbor_labels.long()
+                labels[:, neighbor_start:neighbor_end] = -100
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
@@ -254,8 +254,7 @@ class SelfAttentionModel(nn.Module):
             attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 
             if self.decoder_only:
-                neighbor_labels = -100 * torch.ones((batch_size, total_neighbor_num * n_tokens)).to(labels.device)
-                labels[:, neighbor_start:neighbor_end] = neighbor_labels.long()
+                labels[:, neighbor_start:neighbor_end] = -100
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
         else:

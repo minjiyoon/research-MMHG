@@ -212,6 +212,9 @@ class Arguments:
     n_visual_tokens: int = field(
         default=4, metadata={"help": "visual model to encode neighbor images"}
     )
+    n_virtual_tokens: int = field(
+        default=20, metadata={"help": "visual model to encode neighbor images"}
+    )
     freeze_lm: Optional[bool] = field(
         default=False, metadata={"help": "evaluate model on validation set."}
     )
@@ -453,7 +456,11 @@ def train_loop(train_loader, model, tokenizer, optimizer, epoch, scheduler, args
         if args.decoder_only:
             logits = outputs.logits
             # only consider loss on reference summary just like seq2seq models
-            shift_logits = logits[..., args.max_input_length:-1, :].contiguous()
+            if args.peft_type == "prompt":
+                max_input_length = args.max_input_length + args.n_virtual_tokens
+            else:
+                max_input_length = args.max_input_length
+            shift_logits = logits[..., max_input_length:-1, :].contiguous()
             shift_labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
             # summary_loss
             summary_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
@@ -548,7 +555,11 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
             logits = outputs.logits
             if args.decoder_only:
                 # only consider loss on reference summary just like seq2seq models
-                logits = logits[..., args.max_input_length:-1, :].contiguous()
+                if args.peft_type == "prompt":
+                    max_input_length = args.max_input_length + args.n_virtual_tokens
+                else:
+                    max_input_length = args.max_input_length
+                logits = logits[..., max_input_length:-1, :].contiguous()
                 labels = batch['labels'][..., (args.max_input_length + 1):].contiguous()
                 loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
             else:
@@ -558,10 +569,10 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
 
             if prefix == "test":
                 if args.decoder_only:
-                    generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=32)
-                else:
                     generated_ids = model.module.generate(input_ids=batch["input_ids"][..., :args.max_input_length, :].contiguous(), \
                                                     attention_mask=batch["attention_mask"][..., :args.max_input_length, :].contiguous(), max_new_tokens=32)
+                else:
+                    generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=32)
             else:
                 generated_ids = torch.argmax(logits, dim=-1)
 
