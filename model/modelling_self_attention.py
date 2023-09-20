@@ -212,13 +212,15 @@ class SelfAttentionModel(nn.Module):
             neighbor_attention_mask = neighbor_pos_ids > 0
             neighbor_attention_mask = torch.repeat_interleave(neighbor_attention_mask, repeats=self.n_text_tokens, dim=1)
 
+            neighbor_start = self.args.max_input_length - neighbor_num * self.n_text_tokens
+            neighbor_end = self.args.max_input_length
             input_embs = self.input_embeddings(input_ids)
-            input_embs[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_embeds
-            attention_mask[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_attention_mask
+            input_embs[:, neighbor_start:neighbor_end] = neighbor_embeds
+            attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 
             if self.decoder_only:
                 neighbor_labels = -100 * torch.ones((batch_size, neighbor_num * self.n_text_tokens)).to(labels.device)
-                labels[:, -1 * (total_neighbor_num * n_tokens):] = neighbor_labels.long()
+                labels[:, neighbor_start:neighbor_end] = neighbor_labels.long()
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
