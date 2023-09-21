@@ -23,7 +23,7 @@ def load_wikiweb2m(task):
 
 class WikiWeb2M(torch.utils.data.Dataset):
 
-    def __init__(self, args, df, id_list, tokenizer, visual_feature_extractor_model=None):
+    def __init__(self, args, df, id_list, tokenizer):
         self.path = './wikiweb2m/raw/'
         self.image_path = f'{args.image_path}/images/'
 
@@ -42,8 +42,11 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
 
-        if visual_feature_extractor_model is not None and self.context in ('section_all', 'all'):
-            self.visual_feature_extractor = utils.get_feature_extractor_for_model(visual_feature_extractor_model)
+        if self.neighbor_mode == "embedding":
+            self.text_tokenizer = AutoTokenizer.from_pretrained(args.text_model, use_fast=False)
+            self.text_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+        if self.context in ('section_all', 'all'):
+            self.visual_feature_extractor = utils.get_feature_extractor_for_model(args.visual_model)
 
         self.n_text_tokens = args.n_text_tokens
         self.n_visual_tokens = args.n_visual_tokens
@@ -316,7 +319,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 location += 1
 
         #Tokenize
-        neighbor_texts = self.tokenizer(neighbor_texts, max_length=512, padding="max_length", truncation=True, return_tensors="pt")
+        neighbor_texts = self.text_tokenizer(neighbor_texts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
         result["neighbor_input_ids"] = neighbor_texts.input_ids,
         result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
         result["neighbor_pos_ids"] = torch.LongTensor(position_texts),

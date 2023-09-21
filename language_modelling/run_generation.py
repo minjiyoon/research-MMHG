@@ -359,9 +359,9 @@ def main_worker(gpu, world_size, args, log_dir, run):
     train_data, val_data, test_data, id_list = load_wikiweb2m(args.task)
     print(f'Loading wikiweb2m done: {perf_counter()-start_time}')
     start_time = perf_counter()
-    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer, args.visual_model)
-    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer, args.visual_model)
-    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer, args.visual_model)
+    train_dataset = WikiWeb2M(args, train_data, id_list["train"], tokenizer)
+    val_dataset = WikiWeb2M(args, val_data, id_list["val"], tokenizer)
+    test_dataset = WikiWeb2M(args, test_data, id_list["test"], tokenizer)
     print(f'Initialize datasets: {perf_counter()-start_time}')
     print(f'Training with {len(train_dataset)} examples, validating with {len(val_dataset)} examples, testing with {len(test_dataset)} examples.')
 
