@@ -201,7 +201,7 @@ class Arguments:
         default=False, metadata={"help": "mlp"}
     )
     text_model: str = field(
-        default="roberta-base", metadata={"help": "text model to encode neighbor texts"}
+        default="openai/clip-vit-base-patch16", metadata={"help": "text model to encode neighbor texts"}
     )
     visual_model: str = field(
         default="openai/clip-vit-base-patch16", metadata={"help": "visual model to encode neighbor images"}

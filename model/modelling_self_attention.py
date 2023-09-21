@@ -5,8 +5,8 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
-    RobertaModel,
-    CLIPVisionModel
+    CLIPVisionModel,
+    CLIPTextModel
 )
 
 from peft import (
@@ -65,7 +65,7 @@ class SelfAttentionModel(nn.Module):
                 peft_config = LoraConfig(
                     r=args.lora_r,
                     lora_alpha=args.lora_alpha,
-                    target_modules=["query", "value"],
+                    target_modules=["q_proj", "v_proj"],
                     lora_dropout=args.lora_dropout,
                     bias="none",
                     modules_to_save=["lm_head"],
@@ -91,11 +91,9 @@ class SelfAttentionModel(nn.Module):
         self.text_model = None
         if self.neighbor_mode == "embedding":
             # Text model processing text neighbors
-            config = AutoConfig.from_pretrained(args.text_model)
             embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
-            self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
-            self.text_pooler = TextPooler(config)
-            self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
+            self.text_model = CLIPTextModel.from_pretrained(args.text_model)
+            self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, embedding_dim)
             self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
             self.text_model.eval()
@@ -129,7 +127,7 @@ class SelfAttentionModel(nn.Module):
         attention_mask = attention_mask.reshape(-1, seq_len)
 
         outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-        encoder_outputs = self.text_pooler(outputs.last_hidden_state)
+        encoder_outputs = outputs.pooler_output
         text_embs = self.text_embeddings(encoder_outputs)
 
         if pos_ids is not None:

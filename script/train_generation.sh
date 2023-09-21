@@ -21,26 +21,27 @@ export PYTHONPATH=.
 #MODEL_NAME='facebook/opt-350m'
 MODEL_NAME='facebook/opt-125m'
 TASK='section'
-CONTEXT='section_all'
+CONTEXT='all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
-python language_modelling/run_generation.py \
+CUDA_VISIBLE_DEVICES=1,2,3 python language_modelling/run_generation.py \
     --dataset wikiweb2m \
+    --image_path /data/minji \
     --neighbor_mode embedding \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
-    --peft_type none \
-    --max_input_length 512 \
+    --peft_type lora \
+    --max_input_length 576 \
     --max_output_length 128 \
     --epochs 50 \
-    --steps_per_epoch 10000 \
-    --val_steps_per_epoch 400 \
-    --learning_rate 1e-4 \
-    --per_device_train_batch_size 2 \
-    --per_device_val_batch_size 2 \
+    --steps_per_epoch 5000 \
+    --val_steps_per_epoch 200 \
+    --learning_rate 1e-3 \
+    --per_device_train_batch_size 4 \
+    --per_device_val_batch_size 4 \
     --dataloader_num_workers 8 \
-    --grad_accumulation_steps 16 \
+    --grad_accumulation_steps 8 \
     --fp16 \
     --wandb_project MMHG \
     --wandb_run ${DESCRIPTION}
