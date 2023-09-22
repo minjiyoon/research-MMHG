@@ -33,7 +33,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
     CLIPVisionModel,
-    RobertaModel
+    CLIPTextModel,
 )
 
 from transformers.utils import logging
@@ -82,8 +82,9 @@ class MPTConfig(PretrainedConfig):
             **kwargs,
         )
         # MPT configuration
-        self.num_neighbor_layers = args.num_neighbor_layers
-        self.lora_type = args.lora_type
+        self.neighbor_layer_wise = args.neighbor_layer_wise
+        self.neighbor_mode = args.neighbor_mode
+        self.peft_type = args.peft_type
         self.lora_r = args.lora_r
         self.lora_alpha = args.lora_alpha
         self.lora_dropout = args.lora_dropout
@@ -161,7 +162,6 @@ class LoraAttention(nn.Module):
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
 
-        self.lora_type = config.lora_type
         if config.lora_dropout > 0.0:
             self.lora_dropout = nn.Dropout(p=config.lora_dropout)
         else:
@@ -176,8 +176,8 @@ class LoraAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        neighbor_embeds: Optional[torch.Tensor] = None,
+        neighbor_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
@@ -251,13 +251,13 @@ class LoraAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped
+        return attn_output
 
 
 class MPTAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config, lora):
+    def __init__(self, config, cross_attention):
         super().__init__()
 
         self.embed_dim = config.hidden_size
@@ -278,12 +278,12 @@ class MPTAttention(nn.Module):
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
 
-        self.lora = lora
-        self.lora_type = config.lora_type
-        if self.lora:
-            if self.lora_type == "none" or self.lora_type == "flamingo":
+        self.cross_attention = cross_attention
+        self.peft_type = config.peft_type
+        if self.cross_attention:
+            if self.peft_type in ("none", "flamingo"):
                 self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
-            elif self.lora_type == "version_1":
+            elif self.peft_type == "version_1":
                 if config.lora_dropout > 0.0:
                     self.lora_dropout = nn.Dropout(p=config.lora_dropout)
                 else:
@@ -291,9 +291,9 @@ class MPTAttention(nn.Module):
                 self.lora_scaling = config.lora_alpha / config.lora_r
                 self.lora_A = nn.Linear(self.embed_dim, config.lora_r, bias=False)
                 self.lora_B = nn.Linear(config.lora_r, self.embed_dim, bias=False)
-            elif self.lora_type == "version_2":
+            elif self.peft_type == "version_2":
+                self.bottleneck_attention = LoraAttention(config)
                 self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
-                self.cross_attention = LoraAttention(config)
         else:
             self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=bias)
 
@@ -303,66 +303,41 @@ class MPTAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        neighbor_embeds: Optional[torch.Tensor] = None,
         neighbor_attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
 
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
         query_states = self.q_proj(hidden_states) * self.scaling
         # get key, value proj
-        if is_cross_attention and past_key_value is not None:
-            # reuse k,v, cross_attentions
-            key_states = past_key_value[0]
-            value_states = past_key_value[1]
-        elif is_cross_attention:
+        if self.cross_attention:
             # cross_attentions
-            if self.lora_type == "none" or self.lora_type == "flamingo":
-                key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-                value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+            if self.peft_type in ("none", "flamingo"):
+                key_states = self._shape(self.k_proj(neighbor_embeds), -1, bsz)
+                value_states = self._shape(self.v_proj(neighbor_embeds), -1, bsz)
                 attention_mask = neighbor_attention_mask
-            elif self.lora_type == "version_1":
-                key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-                value_states = self.lora_B(self.lora_A(self.lora_dropout(key_value_states))) * self.lora_scaling
+            elif self.peft_type == "version_1":
+                key_states = self._shape(self.k_proj(neighbor_embeds), -1, bsz)
+                value_states = self.lora_B(self.lora_A(self.lora_dropout(neighbor_embeds))) * self.lora_scaling
                 value_states = self._shape(value_states, -1, bsz)
                 attention_mask = neighbor_attention_mask
-            elif self.lora_type == "version_2":
-                new_key_value_states = self.cross_attention(hidden_states=hidden_states,
-                                                            key_value_states=key_value_states,
-                                                            attention_mask=neighbor_attention_mask)
-                key_states = self._shape(self.k_proj(new_key_value_states), -1, bsz)
-                value_states = self._shape(self.v_proj(new_key_value_states), -1, bsz)
-
-        elif past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+            elif self.peft_type == "version_2":
+                new_neighbor_embeds = self.bottleneck_attention(hidden_states=hidden_states,
+                                                            neighbor_embeds=neighbor_embeds,
+                                                            neighbor_attention_mask=neighbor_attention_mask)
+                key_states = self._shape(self.k_proj(new_neighbor_embeds), -1, bsz)
+                value_states = self._shape(self.v_proj(new_neighbor_embeds), -1, bsz)
         else:
             # self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-
-        if self.is_decoder:
-            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-            # Further calls to cross_attention layer can then reuse all cross-attention
-            # key/value_states (first "if" case)
-            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-            # all previous decoder key/value_states. Further calls to uni-directional self-attention
-            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-            # if encoder bi-directional self-attention `past_key_value` is always `None`
-            past_key_value = (key_states, value_states)
 
         proj_shape = (bsz * self.num_heads, -1, self.head_dim)
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
@@ -433,14 +408,14 @@ class MPTAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped, past_key_value
+        return attn_output, attn_weights_reshaped, None
 
 
 class MPTDecoderLayer(nn.Module):
-    def __init__(self, config, lora=False):
+    def __init__(self, config, cross_attention=False):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = MPTAttention(config, lora)
+        self.self_attn = MPTAttention(config, cross_attention)
         self.do_layer_norm_before = config.do_layer_norm_before
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -449,57 +424,29 @@ class MPTDecoderLayer(nn.Module):
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
 
-        self.lora = lora
-        self.lora_type = config.lora_type
-        if self.lora:
-            #if config.lora_dropout > 0.0:
-            #    self.lora_dropout = nn.Dropout(p=config.lora_dropout)
-            #else:
-            #    self.lora_dropout = nn.Identity()
-            #self.lora_scaling = config.lora_alpha / config.lora_r
-            #self.lora_A1 = nn.Linear(self.embed_dim, config.lora_r, bias=False)
-            #self.lora_B1 = nn.Linear(config.lora_r, config.ffn_dim, bias=False)
-            #self.lora_A2 = nn.Linear(config.ffn_dim, config.lora_r, bias=False)
-            #self.lora_B2 = nn.Linear(config.lora_r, self.embed_dim, bias=False)
-            self.adapter1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=False)
-            self.adapter2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=False)
-        else:
-            self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
-            self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
+        self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
+        self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
 
-        if self.lora_type == "flamingo":
+        self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
+
+        self.cross_attention = cross_attention
+        self.peft_type = config.peft_type
+        if self.peft_type == "flamingo":
             self.tanh_layer = nn.Tanh()
             self.gating1 = nn.Parameter(torch.tensor(0.0))
             self.gating2 = nn.Parameter(torch.tensor(0.0))
-
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        layer_head_mask: Optional[torch.Tensor] = None,
         neighbor_embeds: Optional[torch.FloatTensor] = None,
         neighbor_attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`, *optional*): mask for attention heads in a given layer of size
-                `(encoder_attention_heads,)`.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-        """
 
         residual = hidden_states
 
@@ -510,15 +457,16 @@ class MPTDecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
-            key_value_states=neighbor_embeds,
-            past_key_value=past_key_value,
             attention_mask=attention_mask,
+            neighbor_embeds=neighbor_embeds,
             neighbor_attention_mask=neighbor_attention_mask,
             layer_head_mask=layer_head_mask,
+            past_key_value=past_key_value,
             output_attentions=output_attentions,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        if self.lora_type == "flamingo":
+
+        if self.peft_type == "flamingo":
             hidden_states = residual + self.tanh_layer(self.gating1) * hidden_states
         else:
             hidden_states = residual + hidden_states
@@ -536,21 +484,13 @@ class MPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
 
-        if self.lora:
-            #hidden_states = self.lora_B1(self.lora_A1(self.lora_dropout(hidden_states))) * self.lora_scaling
-            hidden_states = self.adapter1(hidden_states)
-        else:
-            hidden_states = self.fc1(hidden_states)
+        hidden_states = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
 
-        if self.lora:
-            #hidden_states = self.lora_B2(self.lora_A2(self.lora_dropout(hidden_states))) * self.lora_scaling
-            hidden_states = self.adapter2(hidden_states)
-        else:
-            hidden_states = self.fc2(hidden_states)
+        hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        if self.lora_type == "flamingo":
+        if self.peft_type == "flamingo":
             hidden_states = (residual + self.tanh_layer(self.gating2) * hidden_states).view(hidden_states_shape)
         else:
             hidden_states = (residual + hidden_states).view(hidden_states_shape)
@@ -593,12 +533,6 @@ class MPTPreTrainedModel(PreTrainedModel):
 
 
 class MPTDecoder(MPTPreTrainedModel):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`MPTDecoderLayer`]
-
-    Args:
-        config: MPTConfig
-    """
 
     def __init__(self, config: MPTConfig):
         super().__init__(config)
@@ -631,11 +565,16 @@ class MPTDecoder(MPTPreTrainedModel):
         else:
             self.final_layer_norm = None
 
-        self.layers = nn.ModuleList([MPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.lora_type = config.lora_type
-        self.neighbor_layer_start = config.num_hidden_layers - config.num_neighbor_layers
-        if self.lora_type != "none":
-            self.neighbor_layers = nn.ModuleList([MPTDecoderLayer(config, lora=True) for _ in range(config.num_neighbor_layers)])
+        self.cross_attention = (config.neighbor_mode == "cross_attention")
+        self.neighbor_layer_wise = config.neighbor_layer_wise
+        self.peft_type = config.peft_type
+
+        self.layers = nn.ModuleList()
+        self.neighbor_layers = nn.ModuleList()
+        for l in range(config.num_hidden_layers):
+            self.layers.append(MPTDecoderLayer(config))
+            if self.cross_attention and (l + 1) % self.neighbor_layer_wise == 0:
+                self.neighbor_layers.append(MPTDecoderLayer(config, cross_attention=True))
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -685,53 +624,7 @@ class MPTDecoder(MPTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        r"""
-        Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
-                provide it.
 
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
-
-                [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(num_hidden_layers, num_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
-
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
-
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
-                all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-        """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -770,13 +663,10 @@ class MPTDecoder(MPTPreTrainedModel):
         causal_attention_mask = self._prepare_decoder_attention_mask(
             attention_mask, input_shape, inputs_embeds, past_key_values_length
         )
-        pos_embeds = self.embed_positions(attention_mask, past_key_values_length)
-
         if neighbor_attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            neighbor_attention_mask = _expand_mask(neighbor_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-                inputs_embeds.device
-            )
+            neighbor_attention_mask = _expand_mask(neighbor_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(inputs_embeds.device)
+
+        pos_embeds = self.embed_positions(attention_mask, past_key_values_length)
 
         if self.project_in is not None:
             inputs_embeds = self.project_in(inputs_embeds)
@@ -833,38 +723,27 @@ class MPTDecoder(MPTPreTrainedModel):
                     None,
                 )
             else:
-                if idx < self.neighbor_layer_start:
-                    layer_outputs = decoder_layer(
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_attention_mask,
+                    layer_head_mask=(head_mask[idx] if head_mask is not None else None),
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                )
+                if self.cross_attention and (idx + 1) % self.neighbor_layer_wise == 0:
+                    hidden_states = layer_outputs[0]
+                    neighbor_idx = (idx + 1) // self.neighbor_layer_wise - 1
+                    layer_outputs = self.neighbor_layers[neighbor_idx](
                         hidden_states,
                         attention_mask=causal_attention_mask,
-                        layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-                        past_key_value=past_key_value,
-                        output_attentions=output_attentions,
-                        use_cache=use_cache,
-                    )
-                else:
-                    layer_outputs = decoder_layer(
-                        hidden_states,
-                        neighbor_embeds=None if self.lora_type != "none" else neighbor_embeds,
-                        attention_mask=causal_attention_mask,
+                        neighbor_embeds=neighbor_embeds,
                         neighbor_attention_mask=neighbor_attention_mask,
                         layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                         past_key_value=past_key_value,
                         output_attentions=output_attentions,
                         use_cache=use_cache,
                     )
-                    if self.lora_type != "none":
-                        hidden_states = layer_outputs[0]
-                        layer_outputs = self.neighbor_layers[idx - self.neighbor_layer_start](
-                            hidden_states,
-                            neighbor_embeds=neighbor_embeds,
-                            attention_mask=attention_mask,
-                            neighbor_attention_mask=neighbor_attention_mask,
-                            layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-                            past_key_value=past_key_value,
-                            output_attentions=output_attentions,
-                            use_cache=use_cache,
-                        )
 
             hidden_states = layer_outputs[0]
 
@@ -958,7 +837,7 @@ class MPTModel(MPTPreTrainedModel):
         )
 
 
-def reset_lora_parameters(model):
+def reset_peft_parameters(model):
     for n, p in model.named_parameters():
         if "lora_A" in n:
             nn.init.kaiming_uniform_(p, a=math.sqrt(5))
@@ -970,24 +849,13 @@ def reset_lora_parameters(model):
             noise = torch.randn(p.size(0), p.size(1)) * 0.01
             p = identity + noise
 
-def mark_only_lora_as_trainable(model, bias="lora_only"):
+def mark_only_peft_as_trainable(model):
     for n, p in model.named_parameters():
-        if "lora_" not in n and "adapter" not in n:
-            p.requires_grad = False
-    if bias == "none":
-        return
-    elif bias == "all":
-        for n, p in model.named_parameters():
-            if "bias" in n:
+        p.requires_grad = False
+    for m in model.modules():
+        if isinstance(m, MPTAttention) and m.cross_attention == True:
+            for n, p in m.named_parameters():
                 p.requires_grad = True
-    elif bias == "lora_only":
-        for m in model.modules():
-            if isinstance(m, MPTAttention) and m.lora == True:
-                for n, p in m.named_parameters():
-                    p.requires_grad = True
-    else:
-        raise NotImplementedError
-
 
 class MPTForCausalLM(MPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
@@ -1002,9 +870,9 @@ class MPTForCausalLM(MPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        if config.lora_type != 'none':
-            reset_lora_parameters(self.model)
-            mark_only_lora_as_trainable(self.model)
+        if config.peft_type != 'none':
+            reset_peft_parameters(self.model)
+            mark_only_peft_as_trainable(self.model)
 
     def get_input_embeddings(self):
         return self.model.decoder.embed_tokens
@@ -1039,64 +907,6 @@ class MPTForCausalLM(MPTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        r"""
-        Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
-                provide it.
-
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
-
-                [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(num_hidden_layers, num_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
-
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`. The two additional
-                tensors are only required when the model is used as a decoder in a Sequence to Sequence model.
-
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
-
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
-                all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-
-        Returns:
-
-        """
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1173,27 +983,13 @@ class MPTForCausalLM(MPTPreTrainedModel):
         return reordered_past
 
 
-class TextPooler(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
-
 class CrossAttentionModel(nn.Module):
     def __init__(self, args, tokenizer):
         super().__init__()
 
         self.args = args
         self.context = args.context
+        self.neighbor_mode = args.neighbor_mode
         self.n_text_tokens = args.n_text_tokens
         self.n_visual_tokens = args.n_visual_tokens
         self.tokenizer = tokenizer
@@ -1201,29 +997,29 @@ class CrossAttentionModel(nn.Module):
         self.initialize_lm(args)
         self.input_embeddings = self.lm.get_input_embeddings()
 
-        # Text model processing text neighbors
-        config = AutoConfig.from_pretrained(args.text_model)
-        embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
-        self.text_model = RobertaModel.from_pretrained(args.text_model, config=config)
-        self.text_pooler = TextPooler(config)
-        self.text_embeddings = nn.Linear(config.hidden_size, embedding_dim)
-        if args.position_type != "none":
+        self.text_model = None
+        if self.context != "section_only":
+            # Text model processing text neighbors
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
+            self.text_model = CLIPTextModel.from_pretrained(args.text_model)
+            self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, embedding_dim)
             self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
-        self.text_model.eval()
-        for name, param in self.text_model.named_parameters():
-            param.requires_grad = False
+            self.text_model.eval()
+            for name, param in self.text_model.named_parameters():
+                param.requires_grad = False
 
-        # Vision model processing image neighbors
-        embedding_dim = self.input_embeddings.embedding_dim * args.n_vision_tokens
-        self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
-        self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
-        if args.position_type != "none":
+        self.visual_model = None
+        if self.context in ("section_all", "all"):
+            # Vision model processing image neighbors
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_visual_tokens
+            self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
+            self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
             self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
-        self.visual_model.eval()
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
+            self.visual_model.eval()
+            for param in self.visual_model.parameters():
+                param.requires_grad = False
 
         # Freeze the base LM
         if self.args.freeze_lm:
@@ -1266,7 +1062,7 @@ class CrossAttentionModel(nn.Module):
         attention_mask = attention_mask.reshape(-1, seq_len)
 
         outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-        encoder_outputs = self.text_pooler(outputs.last_hidden_state)
+        encoder_outputs = outputs.pooler_output
         text_embs = self.text_embeddings(encoder_outputs)
 
         if pos_ids is not None:
@@ -1292,11 +1088,13 @@ class CrossAttentionModel(nn.Module):
         return visual_embs.reshape(batch_size, neighbor_num, self.n_visual_tokens, -1)
 
     def train(self, mode=True):
-        super(SelfAttentionModel, self).train(mode=mode)
+        super(CrossAttentionModel, self).train(mode=mode)
         if self.args.freeze_lm:
             self.lm.eval()
-        self.text_model.eval()
-        self.visual_model.eval()
+        if self.text_model is not None:
+            self.text_model.eval()
+        if self.visual_model is not None:
+            self.visual_model.eval()
 
     def forward(
         self,
@@ -1313,14 +1111,18 @@ class CrossAttentionModel(nn.Module):
         neighbor_images_pos_ids=None,
         image_locations=None
     ):
-        if self.context in ("section_only", "text_only"):
+        if self.neighbor_mode == "raw" or self.context == "section_only":
+            # For sanity check: run the pure OPT model
+            neighbor_embeds = None
+            neighbor_attention_mask = None
+        elif self.neighbor_mode == "cross_attention" and self.context == "text_only":
             batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
             neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             neighbor_embeds = neighbor_embeds.reshape(batch_size, neighbor_num * self.n_text_tokens, -1)
             neighbor_attention_mask = neighbor_pos_ids > 0
             neighbor_attention_mask = torch.repeat_interleave(neighbor_attention_mask, repeats=self.n_text_tokens, dim=1)
 
-        if self.context in ("section_all", "all"):
+        elif self.neighbor_mode == "cross_attention" and self.context in ("section_all", "all"):
             text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             batch_size, text_neighbor_num, n_tokens, hidden_dim = text_embeds.shape
             text_attention_mask = neighbor_pos_ids > 0
@@ -1331,16 +1133,19 @@ class CrossAttentionModel(nn.Module):
             visual_attention_mask = neighbor_images_pos_ids > 0
             visual_attention_mask = visual_attention_mask.unsqueeze(-1).expand(-1, -1, self.n_visual_tokens)
 
-            neighbor_embeds = torch.zeros((batch_size, text_neighbor_num + visual_neighbor_num, n_tokens, hidden_dim))
+            batch_idx = torch.arange(batch_size)[:, None]
+            total_neighbor_num = text_neighbor_num + visual_neighbor_num
+            neighbor_embeds = torch.zeros((batch_size, total_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
             neighbor_embeds[batch_idx, text_locations] = text_embeds
             neighbor_embeds[batch_idx, image_locations] = text_embeds
             neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
 
-            total_neighbor_num = text_neighbor_num + visual_neighbor_num
-            neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens))
+            neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens)).bool().to(neighbor_attention_mask.device)
             neighbor_attention_mask[batch_idx, text_locations] = text_attention_mask
             neighbor_attention_mask[batch_idx, image_locations] = visual_attention_mask
             neighbor_attention_mask = neighbor_attention_mask.reshape(batch_size, -1)
+        else:
+            raise ValueError(f"Neighbor mode: {self.neighbor_mode} and context: {self.context} are not supported.")
 
         output = self.lm(input_ids=input_ids,
                          attention_mask=attention_mask,

@@ -89,7 +89,7 @@ class SelfAttentionModel(nn.Module):
         self.input_embeddings = self.lm.get_input_embeddings()
 
         self.text_model = None
-        if self.neighbor_mode == "embedding":
+        if self.neighbor_mode == "prefix":
             # Text model processing text neighbors
             embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
             self.text_model = CLIPTextModel.from_pretrained(args.text_model)
@@ -204,7 +204,7 @@ class SelfAttentionModel(nn.Module):
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
-        elif self.neighbor_mode == "embedding" and self.context in ("section_only", "text_only"):
+        elif self.neighbor_mode == "prefix" and self.context in ("section_only", "text_only"):
             batch_size, neighbor_num, seq_len = neighbor_input_ids.shape
             neighbor_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             neighbor_embeds = neighbor_embeds.reshape(batch_size, neighbor_num * self.n_text_tokens, -1)
@@ -222,7 +222,7 @@ class SelfAttentionModel(nn.Module):
 
             return self.lm(inputs_embeds=input_embs, attention_mask=attention_mask, labels=labels)
 
-        elif self.neighbor_mode == "embedding" and self.context in ("section_all", "all"):
+        elif self.neighbor_mode == "prefix" and self.context in ("section_all", "all"):
             text_embeds = self.get_text_embs(neighbor_input_ids, neighbor_attention_mask, neighbor_pos_ids)
             batch_size, text_neighbor_num, n_tokens, hidden_dim = text_embeds.shape
             text_attention_mask = neighbor_pos_ids > 0

@@ -231,8 +231,8 @@ class Arguments:
         default="none", metadata={"help": "position id type for text neighbors"}
     )
 
-    num_neighbor_layers: int = field(
-        default=4, metadata={"help": "number of cross-attention layers for neighbor information"}
+    neighbor_layer_wise: int = field(
+        default=1, metadata={"help": "number of cross-attention layers for neighbor information"}
     )
     peft_type: str = field(
         default="none", metadata={"help": "lora type for cross attention"}

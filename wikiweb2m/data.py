@@ -96,7 +96,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         return None, None
 
     def __getitem__(self, index):
-        if self.neighbor_mode == "embedding":
+        if self.neighbor_mode == "prefix":
             return self.get_embedding_item(index)
 
         page_id, section_id = self.id_list[index]
