@@ -42,7 +42,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.max_input_length = args.max_input_length
         self.max_output_length = args.max_output_length
 
-        if self.neighbor_mode == "embedding":
+        if self.neighbor_mode in ('prefix', 'cross_attention'):
             self.text_tokenizer = AutoTokenizer.from_pretrained(args.text_model, use_fast=False)
             self.text_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
         if self.context in ('section_all', 'all'):
@@ -96,7 +96,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         return None, None
 
     def __getitem__(self, index):
-        if self.neighbor_mode == "prefix":
+        if self.neighbor_mode in ("prefix", "cross_attention"):
             return self.get_embedding_item(index)
 
         page_id, section_id = self.id_list[index]

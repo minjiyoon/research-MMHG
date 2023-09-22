@@ -1137,7 +1137,7 @@ class CrossAttentionModel(nn.Module):
             total_neighbor_num = text_neighbor_num + visual_neighbor_num
             neighbor_embeds = torch.zeros((batch_size, total_neighbor_num, n_tokens, hidden_dim)).to(neighbor_input_ids.device)
             neighbor_embeds[batch_idx, text_locations] = text_embeds
-            neighbor_embeds[batch_idx, image_locations] = text_embeds
+            neighbor_embeds[batch_idx, image_locations] = visual_embeds
             neighbor_embeds = neighbor_embeds.reshape(batch_size, -1, hidden_dim)
 
             neighbor_attention_mask = torch.zeros((batch_size, total_neighbor_num, n_tokens)).bool().to(neighbor_attention_mask.device)
