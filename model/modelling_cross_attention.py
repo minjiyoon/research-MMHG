@@ -853,7 +853,7 @@ def mark_only_peft_as_trainable(model):
     for n, p in model.named_parameters():
         p.requires_grad = False
     for m in model.modules():
-        if isinstance(m, MPTAttention) and m.cross_attention == True:
+        if isinstance(m, MPTDecoderLayer) and m.cross_attention == True:
             for n, p in m.named_parameters():
                 p.requires_grad = True
 
