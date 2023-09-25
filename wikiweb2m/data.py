@@ -26,6 +26,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
     def __init__(self, args, df, id_list, tokenizer):
         self.path = './wikiweb2m/raw/'
         self.image_path = f'{args.image_path}/images/'
+        if not os.path.exists(self.image_path):
+            raise ValueError(f'{self.image_path} does not exist')
 
         self.task = args.task
         self.context = args.context
@@ -83,11 +85,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
         image_captions = d['image_caption'].reshape(section_num, -1)
         for image_id in range(image_urls[section_id].shape[0]):
             image_url = image_urls[section_id][image_id].decode()
+            if image_url == '':
+                continue
             file_format = os.path.splitext(image_url)[1][1:]
             file_name = f'{self.image_path}/{page_id}_{section_id}_{image_id}.{file_format}'
             if os.path.exists(file_name):
                 try:
-                    img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
+                    img = Image.open(file_name)
                     section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
                     section_caption = image_captions[section_id][image_id].decode()
                     return section_image, ' '.join(section_caption.replace('\n', ' ').split())
@@ -149,7 +153,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                 images.append(torch.zeros((3,  224, 224)))
             else:
-                inputs = "summarize: " + section_info + ", context: " + section_caption
+                inputs = "summarize: " + section_info #+ ", context: " + section_caption
                 visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                 images.append(section_image)
             max_text_length = self.max_input_length - self.n_visual_tokens
@@ -171,7 +175,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                         visual_ids = torch.LongTensor(self.n_visual_tokens * [self.tokenizer.pad_token_id])
                         images.append(torch.zeros((3,  224, 224)))
                     else:
-                        context = context_info + context_caption
+                        context = context_info #+ context_caption
                         visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
                         images.append(context_image)
                     context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0][1:]

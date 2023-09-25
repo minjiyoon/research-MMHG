@@ -140,7 +140,6 @@ class SelfAttentionModel(nn.Module):
     def get_visual_embs(self, pixel_values, pos_ids=None):
         batch_size, neighbor_num, pixel, width, height = pixel_values.shape
         pixel_values = pixel_values.reshape(-1, pixel, width, height)
-
         outputs = self.visual_model(pixel_values)
         encoder_outputs = outputs.pooler_output
         visual_embs = self.visual_embeddings(encoder_outputs)
@@ -193,8 +192,6 @@ class SelfAttentionModel(nn.Module):
             else:
                 for batch_idx in range(batch_size):
                     for image_idx in range(images.shape[1]):
-                        if self.n_visual_tokens * (image_idx + 1) - 1 >= image_positions[batch_idx].shape[0]:
-                            print(image_idx, images.shape, image_positions.shape)
                         image_position = image_positions[batch_idx][self.n_visual_tokens * image_idx: self.n_visual_tokens * (image_idx + 1)]
                         if image_position.sum() == -1 * self.n_visual_tokens:
                             continue

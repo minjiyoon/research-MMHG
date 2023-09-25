@@ -431,8 +431,9 @@ class MPTDecoderLayer(nn.Module):
 
         self.cross_attention = cross_attention
         self.peft_type = config.peft_type
-        if self.peft_type == "flamingo":
-            self.tanh_layer = nn.Tanh()
+        if self.cross_attention and self.peft_type == "flamingo":
+            self.tanh_layer1 = nn.Tanh()
+            self.tanh_layer2 = nn.Tanh()
             self.gating1 = nn.Parameter(torch.tensor(0.0))
             self.gating2 = nn.Parameter(torch.tensor(0.0))
 
@@ -466,8 +467,8 @@ class MPTDecoderLayer(nn.Module):
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        if self.peft_type == "flamingo":
-            hidden_states = residual + self.tanh_layer(self.gating1) * hidden_states
+        if self.cross_attention and self.peft_type == "flamingo":
+            hidden_states = residual + self.tanh_layer1(self.gating1) * hidden_states
         else:
             hidden_states = residual + hidden_states
 
@@ -490,8 +491,8 @@ class MPTDecoderLayer(nn.Module):
         hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        if self.peft_type == "flamingo":
-            hidden_states = (residual + self.tanh_layer(self.gating2) * hidden_states).view(hidden_states_shape)
+        if self.cross_attention and self.peft_type == "flamingo":
+            hidden_states = (residual + self.tanh_layer2(self.gating2) * hidden_states).view(hidden_states_shape)
         else:
             hidden_states = (residual + hidden_states).view(hidden_states_shape)
 
@@ -930,7 +931,6 @@ class MPTForCausalLM(MPTPreTrainedModel):
         )
 
         logits = self.lm_head(outputs[0]).contiguous()
-
         loss = None
         if labels is not None:
             # move labels to correct device to enable model parallelism
