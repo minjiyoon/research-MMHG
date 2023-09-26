@@ -26,6 +26,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
     def __init__(self, args, df, id_list, tokenizer):
         self.path = './wikiweb2m/raw/'
         self.image_path = f'{args.image_path}/images/'
+        if not os.path.exists(self.image_path) and args.context in ('section_all', 'all'):
+            raise ValueError(f'{self.image_path} does not exist')
 
         self.task = args.task
         self.context = args.context
@@ -43,6 +45,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
         self.max_output_length = args.max_output_length
 
         if self.neighbor_mode in ('prefix', 'cross_attention'):
+            self.text_model = args.text_model
             self.text_tokenizer = AutoTokenizer.from_pretrained(args.text_model, use_fast=False)
             self.text_tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
         if self.context in ('section_all', 'all'):
@@ -319,7 +322,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 location += 1
 
         #Tokenize
-        neighbor_texts = self.text_tokenizer(neighbor_texts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
+        neighbor_max_length = 77 if "clip" in self.text_model else 512
+        neighbor_texts = self.text_tokenizer(neighbor_texts, max_length=neighbor_max_length, padding="max_length", truncation=True, return_tensors="pt")
         result["neighbor_input_ids"] = neighbor_texts.input_ids,
         result["neighbor_attention_mask"] = neighbor_texts.attention_mask,
         result["neighbor_pos_ids"] = torch.LongTensor(position_texts),

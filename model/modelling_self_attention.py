@@ -74,6 +74,7 @@ class SelfAttentionModel(nn.Module):
                 peft_config = PrefixTuningConfig(
                     task_type=peft_task_type,
                     inference_mode=False,
+                    prefix_projection=True,
                     num_virtual_tokens=self.n_virtual_tokens
                 )
             elif args.peft_type == "prompt":

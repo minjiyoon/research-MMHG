@@ -34,6 +34,7 @@ from transformers import (
     AutoModelForCausalLM,
     CLIPVisionModel,
     CLIPTextModel,
+    RobertaModel,
 )
 
 from transformers.utils import logging
@@ -431,8 +432,9 @@ class MPTDecoderLayer(nn.Module):
 
         self.cross_attention = cross_attention
         self.peft_type = config.peft_type
-        if self.peft_type == "flamingo":
-            self.tanh_layer = nn.Tanh()
+        if self.cross_attention and self.peft_type == "flamingo":
+            self.tanh_layer1 = nn.Tanh()
+            self.tanh_layer2 = nn.Tanh()
             self.gating1 = nn.Parameter(torch.tensor(0.0))
             self.gating2 = nn.Parameter(torch.tensor(0.0))
 
@@ -466,8 +468,8 @@ class MPTDecoderLayer(nn.Module):
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        if self.peft_type == "flamingo":
-            hidden_states = residual + self.tanh_layer(self.gating1) * hidden_states
+        if self.cross_attention and self.peft_type == "flamingo":
+            hidden_states = residual + self.tanh_layer1(self.gating1) * hidden_states
         else:
             hidden_states = residual + hidden_states
 
@@ -490,8 +492,8 @@ class MPTDecoderLayer(nn.Module):
         hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        if self.peft_type == "flamingo":
-            hidden_states = (residual + self.tanh_layer(self.gating2) * hidden_states).view(hidden_states_shape)
+        if self.cross_attention and self.peft_type == "flamingo":
+            hidden_states = (residual + self.tanh_layer2(self.gating2) * hidden_states).view(hidden_states_shape)
         else:
             hidden_states = (residual + hidden_states).view(hidden_states_shape)
 
@@ -853,7 +855,7 @@ def mark_only_peft_as_trainable(model):
     for n, p in model.named_parameters():
         p.requires_grad = False
     for m in model.modules():
-        if isinstance(m, MPTAttention) and m.cross_attention == True:
+        if isinstance(m, MPTDecoderLayer) and m.cross_attention == True:
             for n, p in m.named_parameters():
                 p.requires_grad = True
 
@@ -983,6 +985,21 @@ class MPTForCausalLM(MPTPreTrainedModel):
         return reordered_past
 
 
+class TextPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+
 class CrossAttentionModel(nn.Module):
     def __init__(self, args, tokenizer):
         super().__init__()
@@ -1001,7 +1018,11 @@ class CrossAttentionModel(nn.Module):
         if self.context != "section_only":
             # Text model processing text neighbors
             embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
-            self.text_model = CLIPTextModel.from_pretrained(args.text_model)
+            if "clip" in args.text_model:
+                self.text_model = CLIPTextModel.from_pretrained(args.text_model)
+            else:
+                self.text_model = RobertaModel.from_pretrained(args.text_model)
+                self.text_pooler = TextPooler(self.text_model.config)
             self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, embedding_dim)
             self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
@@ -1062,7 +1083,10 @@ class CrossAttentionModel(nn.Module):
         attention_mask = attention_mask.reshape(-1, seq_len)
 
         outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-        encoder_outputs = outputs.pooler_output
+        if "clip" in self.args.text_model:
+            encoder_outputs = outputs.pooler_output
+        else:
+            encoder_outputs = self.text_pooler(outputs.last_hidden_state)
         text_embs = self.text_embeddings(encoder_outputs)
 
         if pos_ids is not None:
