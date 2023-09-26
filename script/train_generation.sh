@@ -21,12 +21,11 @@ export PYTHONPATH=.
 #MODEL_NAME='facebook/opt-350m'
 MODEL_NAME='facebook/opt-125m'
 TASK='section'
-CONTEXT='section_only'
+CONTEXT='section_all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
     --dataset wikiweb2m \
-    --image_path /data/minji \
     --neighbor_mode raw \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
@@ -35,14 +34,13 @@ python language_modelling/run_generation.py \
     --max_input_length 512 \
     --max_output_length 128 \
     --epochs 50 \
-    --steps_per_epoch 2500 \
-    --val_steps_per_epoch 50 \
+    --steps_per_epoch 10000 \
+    --val_steps_per_epoch 400 \
     --learning_rate 1e-4 \
-    --per_device_train_batch_size 8 \
-    --per_device_val_batch_size 16 \
+    --per_device_train_batch_size 2 \
+    --per_device_val_batch_size 2 \
     --dataloader_num_workers 8 \
-    --grad_accumulation_steps 4 \
+    --grad_accumulation_steps 16 \
     --fp16 \
-    --resume facebook/opt-125m-section-section_only_6 \
     --wandb_project MMHG \
     --wandb_run ${DESCRIPTION}
