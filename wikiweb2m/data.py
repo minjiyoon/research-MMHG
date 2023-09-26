@@ -86,16 +86,15 @@ class WikiWeb2M(torch.utils.data.Dataset):
         image_captions = d['image_caption'].reshape(section_num, -1)
         for image_id in range(image_urls[section_id].shape[0]):
             image_url = image_urls[section_id][image_id].decode()
+            if image_url == '':
+                continue
             file_format = os.path.splitext(image_url)[1][1:]
             file_name = f'{self.image_path}/{page_id}_{section_id}_{image_id}.{file_format}'
             if os.path.exists(file_name):
-                try:
-                    img = Image.open(f'./wikiweb2m/raw/images/{page_id}_{section_id}_{image_id}.{file_format}')
+                with Image.open(file_name) as img:
                     section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
                     section_caption = image_captions[section_id][image_id].decode()
-                    return section_image, ' '.join(section_caption.replace('\n', ' ').split())
-                except:
-                    continue
+                return section_image, ' '.join(section_caption.replace('\n', ' ').split())
         return None, None
 
     def __getitem__(self, index):
@@ -121,7 +120,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 images.append(torch.zeros((3,  224, 224)))
             else:
                 inputs = "summarize: " + section_info + ", context: " + image_caption
-                visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [100])
                 images.append(image)
             max_text_length = self.max_input_length - self.n_visual_tokens
             input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
@@ -153,7 +152,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 images.append(torch.zeros((3,  224, 224)))
             else:
                 inputs = "summarize: " + section_info + ", context: " + section_caption
-                visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
+                visual_ids = torch.LongTensor(self.n_visual_tokens * [100])
                 images.append(section_image)
             max_text_length = self.max_input_length - self.n_visual_tokens
             input_ids = self.tokenizer(inputs, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0]
@@ -175,7 +174,7 @@ class WikiWeb2M(torch.utils.data.Dataset):
                         images.append(torch.zeros((3,  224, 224)))
                     else:
                         context = context_info + context_caption
-                        visual_ids = torch.LongTensor(self.n_visual_tokens * [-1])
+                        visual_ids = torch.LongTensor(self.n_visual_tokens * [100])
                         images.append(context_image)
                     context_ids = self.tokenizer(context, max_length=max_text_length, padding="do_not_pad", truncation=True, return_tensors="pt").input_ids[0][1:]
                     image_positions.append(input_ids.shape[0] + context_ids.shape[0] + torch.arange(self.n_visual_tokens))
@@ -334,5 +333,25 @@ class WikiWeb2M(torch.utils.data.Dataset):
             result["image_locations"] = torch.LongTensor(location_images),
 
         return result
+
+def collate(items):
+    input_ids = []
+    attention_mask = []
+    labels = []
+    images = []
+    image_positions = []
+    for item in items:
+        input_ids.append(item["input_ids"])
+        attention_mask.append(item["attention_mask"])
+        labels.append(item["labels"])
+        images.append(item["images"])
+        image_positions.append(item["image_positions"])
+    return {
+            "input_ids": torch.stack(input_ids, dim=0),
+            "attention_mask": torch.stack(attention_mask, dim=0),
+            "images": torch.stack(images, dim=0),
+            "labels": torch.stack(labels, dim=0),
+            "image_positions": torch.stack(image_positions, dim=0),
+            }
 
 

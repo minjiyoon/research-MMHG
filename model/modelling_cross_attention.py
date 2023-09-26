@@ -932,7 +932,6 @@ class MPTForCausalLM(MPTPreTrainedModel):
         )
 
         logits = self.lm_head(outputs[0]).contiguous()
-
         loss = None
         if labels is not None:
             # move labels to correct device to enable model parallelism

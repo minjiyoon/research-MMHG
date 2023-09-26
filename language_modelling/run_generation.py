@@ -282,7 +282,6 @@ def main():
     ngpus_per_node = torch.cuda.device_count()
     mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, log_dir, run))
 
-
 def main_worker(gpu, world_size, args, log_dir, run):
     global best_acc1
     print("Use GPU: {} for training".format(gpu))
@@ -319,7 +318,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     torch.cuda.set_device(gpu)
     model.cuda(gpu)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=True)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=(args.context == "section_all"))
 
     if "t5" in args.model_name_or_path:
         print('Using Adafactor as the optimizer.')
@@ -550,7 +549,6 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
                 if type(v) == list:
                     batch[k] = v[0]
             batch = {k: v.cuda(gpu, non_blocking=True) for k, v in batch.items()}
-
             outputs = model(**batch)
             logits = outputs.logits
             if args.decoder_only:
@@ -575,7 +573,6 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
                     generated_ids = model.module.generate(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], max_new_tokens=32)
             else:
                 generated_ids = torch.argmax(logits, dim=-1)
-
             all_generated_ids = [torch.zeros_like(generated_ids) for _ in range(dist.get_world_size())]
             dist.all_gather(all_generated_ids, generated_ids)
             all_generated_ids[dist.get_rank()] = generated_ids
@@ -591,7 +588,6 @@ def evaluate_loop(val_loader, model, tokenizer, epoch, args, run, prefix="val"):
                 all_tgt_tokens[all_tgt_tokens == -100] = tokenizer.pad_token_id
             generated_captions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             gt_captions = tokenizer.batch_decode(all_tgt_tokens, skip_special_tokens=True)
-
             for cap_i in range(len(generated_captions)):
                 stop_idx = generated_captions[cap_i].find('.')
                 if stop_idx > 5:
