@@ -91,9 +91,13 @@ class WikiWeb2M(torch.utils.data.Dataset):
             file_format = os.path.splitext(image_url)[1][1:]
             file_name = f'{self.image_path}/{page_id}_{section_id}_{image_id}.{file_format}'
             if os.path.exists(file_name):
-                with Image.open(file_name) as img:
-                    section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
-                    section_caption = image_captions[section_id][image_id].decode()
+                try:
+                    with Image.open(file_name) as img:
+                        section_image = utils.get_pixel_values_for_model(self.visual_feature_extractor, img)
+                        section_caption = image_captions[section_id][image_id].decode()
+                except Exception as e:
+                    print(f"Error encountered: {e}")
+                    continue
                 return section_image, ' '.join(section_caption.replace('\n', ' ').split())
         return None, None
 
