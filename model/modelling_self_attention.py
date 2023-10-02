@@ -18,6 +18,7 @@ from peft import (
     get_peft_model,
 )
 
+from .graph import GCN
 
 class TextPooler(nn.Module):
     def __init__(self, config):
@@ -42,6 +43,7 @@ class SelfAttentionModel(nn.Module):
         self.context = args.context
         self.decoder_only = args.decoder_only
         self.neighbor_mode = args.neighbor_mode
+        self.position_type = args.position_type
         self.n_text_tokens = args.n_text_tokens
         self.n_visual_tokens = args.n_visual_tokens
         self.n_virtual_tokens = args.n_virtual_tokens
@@ -95,7 +97,8 @@ class SelfAttentionModel(nn.Module):
             embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
             self.text_model = CLIPTextModel.from_pretrained(args.text_model)
             self.text_embeddings = nn.Linear(self.text_model.config.hidden_size, embedding_dim)
-            self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+            if self.position_type == "none":
+                self.text_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
             self.text_model.eval()
             for name, param in self.text_model.named_parameters():
@@ -107,11 +110,23 @@ class SelfAttentionModel(nn.Module):
             embedding_dim = self.input_embeddings.embedding_dim * args.n_visual_tokens
             self.visual_model = CLIPVisionModel.from_pretrained(args.visual_model)
             self.visual_embeddings = nn.Linear(self.visual_model.config.hidden_size, embedding_dim)
-            self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
+            if self.position_type == "none":
+                self.visual_position_embeddings = nn.Embedding(args.max_output_length + 1, embedding_dim) # + 1 for padding neighbors
 
             self.visual_model.eval()
             for param in self.visual_model.parameters():
                 param.requires_grad = False
+
+        if self.position_type == "laplacian":
+            if self.context in ("section_only", "section_all", "text_only") or self.neighbor_mode == "raw":
+                raise ValueError(f"[Laplacian PE] neighbor mode: {self.neighbor_mode} and context: {self.context} are not supported.")
+            k = 1 + args.max_text_neighbors + args.max_image_neighbors - 5
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
+            self.lpe_embeddings = nn.Linear(k, embedding_dim)
+
+        if self.position_type == "gnn":
+            embedding_dim = self.input_embeddings.embedding_dim * args.n_text_tokens
+            self.gnn = GCN(input_dim=embedding_dim, output_dim=embedding_dim, hidden_dim=self.text_model.config.hidden_size)
 
         # Freeze the base LM
         if self.args.freeze_lm:
@@ -122,7 +137,7 @@ class SelfAttentionModel(nn.Module):
         else:
             self.lm.train()
 
-    def get_text_embs(self, input_ids, attention_mask, pos_ids=None):
+    def get_text_embs(self, input_ids, attention_mask, pos_ids):
         batch_size, neighbor_num, seq_len = input_ids.shape
         input_ids = input_ids.reshape(-1, seq_len)
         attention_mask = attention_mask.reshape(-1, seq_len)
@@ -131,7 +146,7 @@ class SelfAttentionModel(nn.Module):
         encoder_outputs = outputs.pooler_output
         text_embs = self.text_embeddings(encoder_outputs)
 
-        if pos_ids is not None:
+        if self.position_type == "none":
             pos_ids = pos_ids.reshape(-1)
             text_embs = text_embs + self.text_position_embeddings(pos_ids)
 
@@ -145,7 +160,7 @@ class SelfAttentionModel(nn.Module):
         encoder_outputs = outputs.pooler_output
         visual_embs = self.visual_embeddings(encoder_outputs)
 
-        if pos_ids is not None:
+        if self.position_type == "none" and pos_ids is not None:
             pos_ids = pos_ids.reshape(-1)
             visual_embs = visual_embs + self.visual_position_embeddings(pos_ids)
 
@@ -174,7 +189,9 @@ class SelfAttentionModel(nn.Module):
         text_locations=None,
         neighbor_images=None,
         neighbor_images_pos_ids=None,
-        image_locations=None
+        image_locations=None,
+        lpe=None,
+        graph=None
     ):
 
         if self.neighbor_mode == "raw" and self.context in ("section_only", "text_only"):
@@ -246,6 +263,16 @@ class SelfAttentionModel(nn.Module):
             neighbor_start = self.args.max_input_length - total_neighbor_num * n_tokens
             neighbor_end = self.args.max_input_length
             input_embs = self.input_embeddings(input_ids)
+            if self.context == "all":
+                if self.position_type == "laplacian":
+                    lpe_embeddings = self.lpe_embeddings(lpe)
+                    lpe_embeddings = lpe_embeddings.reshape(batch_size, total_neighbor_num + 1, n_tokens, hidden_dim)
+                    neighbor_embeds = neighbor_embeds + lpe_embeddings[:, 1:].reshape(batch_size, -1, hidden_dim)
+                elif self.position_type == "gnn":
+                    neighbor_embeds = neighbor_embeds.view(batch_size, total_neighbor_num, n_tokens, hidden_dim).view(batch_size, total_neighbor_num, -1)
+                    gnn_embeds = self.gnn(neighbor_embeds, graph)
+                    neighbor_embeds = neighbor_embeds + gnn_embeds
+                    neighbor_embeds = neighbor_embeds.view(batch_size, total_neighbor_num, n_tokens, hidden_dim).view(batch_size, -1, hidden_dim)
             input_embs[:, neighbor_start:neighbor_end] = neighbor_embeds
             attention_mask[:, neighbor_start:neighbor_end] = neighbor_attention_mask
 

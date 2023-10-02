@@ -8,6 +8,7 @@ from PIL import Image
 from urllib.request import urlopen
 
 from language_modelling import utils
+from torch_geometric.data import Data
 
 
 def load_wikiweb2m(task):
@@ -259,6 +260,9 @@ class WikiWeb2M(torch.utils.data.Dataset):
         location_texts = []
         location_images = []
         location = 0
+        # Graph
+        graph_index = {section_id: 0} # input text: 0, neighbors: location + 1
+        edge_list = []
 
         #(1) page information
         page_info = self.get_page_info(d)
@@ -266,6 +270,8 @@ class WikiWeb2M(torch.utils.data.Dataset):
         position_texts.append(len(position_texts))
         location_texts.append(location)
         location += 1
+        # Graph: input_text <-> page description
+        edge_list.append((graph_index[section_id], location))
 
         #(2) session image information
         if self.context != "text_only":
@@ -275,13 +281,22 @@ class WikiWeb2M(torch.utils.data.Dataset):
                 position_images.append(len(position_images))
                 location_images.append(location)
                 location += 1
+                # Graph: input_text <-> image
+                edge_list.append((graph_index[section_id], location))
+                previous_image_id = location
+
                 neighbor_texts.append(section_caption)
                 position_texts.append(len(position_texts))
                 location_texts.append(location)
                 location += 1
+                # Graph: input_text <-> caption
+                edge_list.append((graph_index[section_id], location))
+                # Graph: image <-> caption
+                edge_list.append((previous_image_id, location))
 
         #(3) rest section information
         if self.context != "section_all":
+            previous_section_id = 1 # page
             for context_id in range(len(d['section_title'])):
                 if context_id == section_id:
                     continue
@@ -291,6 +306,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
                     position_texts.append(len(position_texts))
                     location_texts.append(location)
                     location += 1
+                    # Graph: previous section - current section (order)
+                    edge_list.append((previous_section_id, location))
+                    graph_index[context_id] = location
+                    previous_section_id = location
 
                 if self.context != "text_only":
                     if len(neighbor_images) < self.max_image_neighbors:
@@ -300,12 +319,37 @@ class WikiWeb2M(torch.utils.data.Dataset):
                             position_images.append(len(position_images))
                             location_images.append(location)
                             location += 1
+                            # Graph: section <-> image
+                            edge_list.append((previous_section_id, location))
+                            previous_image_id = location
 
                             if len(neighbor_texts) < self.max_text_neighbors:
                                 neighbor_texts.append(context_caption)
                                 position_texts.append(len(position_texts))
                                 location_texts.append(location)
                                 location += 1
+                                # Graph: section <-> caption
+                                edge_list.append((previous_section_id, location))
+                                # Graph: image <-> caption
+                                edge_list.append((previous_image_id, location))
+
+        # Graph: hierachical relations
+        for context_id in range(len(d['section_parent_index'])):
+            parent_id = d['section_parent_index'][context_id]
+            if context_id in graph_index.keys() and parent_id in graph_index.keys():
+                edge_list.append((graph_index[context_id], graph_index[parent_id]))
+
+        # PyG graph data
+        node_num = 1 + self.max_text_neighbors + self.max_image_neighbors
+        edge_index = torch.LongTensor(edge_list).t().contiguous()
+        if self.position_type == 'laplacian':
+            node_value = torch.zeros((node_num))
+            graph = Data(x=node_value, edge_index=edge_index)
+            lpe = utils.compute_LPE(graph)
+        elif self.position_type == 'gnn':
+            edge_value = torch.ones((edge_index.shape[1]))
+            graph = torch.sparse_coo_tensor(edge_index, edge_value, [node_num, node_num]).to_dense()
+            graph = utils.normalize_graph(graph)
 
         # Increase position ids by 1 for padding_id
         position_texts = [position_id + 1 for position_id in position_texts]
@@ -335,7 +379,10 @@ class WikiWeb2M(torch.utils.data.Dataset):
             result["neighbor_images"] = torch.stack(neighbor_images, dim=0),
             result["neighbor_images_pos_ids"] = torch.LongTensor(position_images)
             result["image_locations"] = torch.LongTensor(location_images),
-
+        if self.position_type == 'laplacian':
+            result["lpe"] = lpe
+        if self.position_type == 'gnn':
+            result["graph"] = graph
         return result
 
 def collate(items):

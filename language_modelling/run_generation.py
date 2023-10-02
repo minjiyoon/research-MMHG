@@ -228,7 +228,7 @@ class Arguments:
         default=5, metadata={"help": "maximum number of image neighbors"}
     )
     position_type: str = field(
-        default="none", metadata={"help": "position id type for text neighbors"}
+        default="none", metadata={"help": "position id type for neighbors"}
     )
 
     neighbor_layer_wise: int = field(
@@ -318,7 +318,7 @@ def main_worker(gpu, world_size, args, log_dir, run):
 
     torch.cuda.set_device(gpu)
     model.cuda(gpu)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=(args.context == "section_all"))
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=(args.context in ("all", "section_all")))
 
     if "t5" in args.model_name_or_path:
         print('Using Adafactor as the optimizer.')

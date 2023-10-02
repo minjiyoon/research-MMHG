@@ -21,16 +21,17 @@ export PYTHONPATH=.
 #MODEL_NAME='facebook/opt-350m'
 MODEL_NAME='facebook/opt-125m'
 TASK='section'
-CONTEXT='section_all'
+CONTEXT='all'
 DESCRIPTION=${MODEL_NAME}-${TASK}-${CONTEXT}
 
 python language_modelling/run_generation.py \
     --dataset wikiweb2m \
-    --neighbor_mode raw \
+    --neighbor_mode prefix \
     --model_name_or_path ${MODEL_NAME} \
     --task ${TASK} \
     --context ${CONTEXT} \
-    --peft_type none \
+    --peft_type prefix \
+    --position_type laplacian \
     --max_input_length 512 \
     --max_output_length 128 \
     --epochs 50 \

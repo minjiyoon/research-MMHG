@@ -1132,7 +1132,8 @@ class CrossAttentionModel(nn.Module):
         text_locations=None,
         neighbor_images=None,
         neighbor_images_pos_ids=None,
-        image_locations=None
+        image_locations=None,
+        graph=None
     ):
         if self.neighbor_mode == "raw" or self.context == "section_only":
             # For sanity check: run the pure OPT model

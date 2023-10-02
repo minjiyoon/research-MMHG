@@ -4,12 +4,122 @@ from PIL import Image
 import shutil
 import torch
 import torch.distributed as dist
-
+#import torch_scatter
 import nltk
 try:
     nltk.data.find("tokenizers/punkt")
 except (LookupError, OSError):
     nltk.download("punkt", quiet=True)
+
+from scipy.sparse.linalg import eigsh
+import numpy as np
+
+def scatter_sum(src, index, dim=-1, out_size=None):
+    if out_size is None:
+        out_size = int(index.max().item()) + 1
+
+    # Create an output tensor filled with zeros
+    size = list(src.size())
+    size[dim] = out_size
+    out = torch.zeros(*size, device=src.device, dtype=src.dtype)
+
+    # Expand index tensor to have the same size as src
+    expanded_idx = index.unsqueeze(dim).expand_as(src)
+
+    # Scatter the source values
+    out.scatter_add_(dim, expanded_idx, src)
+
+    return out
+
+
+def to_scipy_sparse_matrix(edge_index, edge_attr = None, num_nodes = None):
+    row, col = edge_index
+    edge_attr = edge_attr.view(-1)
+    N = num_nodes
+    out = scipy.sparse.coo_matrix((edge_attr.numpy(), (row.numpy(), col.numpy())), (N, N))
+    return out
+
+def remove_self_loops(edge_index, edge_attr):
+    mask = edge_index[0] != edge_index[1]
+    edge_index = edge_index[:, mask]
+    return edge_index, None #edge_attr[mask]
+
+def add_self_loops(
+    edge_index,
+    edge_attr,
+    fill_value,
+    num_nodes,
+):
+    N = num_nodes
+    size = (N, N)
+    loop_index = torch.arange(0, N, dtype=torch.long, device=edge_index.device)
+    loop_index = loop_index.unsqueeze(0).repeat(2, 1)
+    loop_attr = edge_attr.new_full((N, ) + edge_attr.size()[1:], fill_value)
+    edge_attr = torch.cat([edge_attr, loop_attr], dim=0)
+    edge_index = torch.cat([edge_index, loop_index], dim=1)
+    return edge_index, edge_attr
+
+
+def get_laplacian(
+    edge_index,
+    edge_weight= None,
+    normalization= None,
+    num_nodes= None,
+):
+    edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
+
+    edge_weight = torch.ones(edge_index.size(1), dtype=torch.float, device=edge_index.device)
+
+    row, col = edge_index[0], edge_index[1]
+    deg = scatter_sum(edge_weight, row, 0, out_size=num_nodes)
+
+    # Compute A_norm = -D^{-1/2} A D^{-1/2}.
+    deg_inv_sqrt = deg.pow_(-0.5)
+    deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
+    edge_weight = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+
+    # L = I - A_norm.
+    edge_index, tmp = add_self_loops(edge_index, -edge_weight,
+                                        fill_value=1., num_nodes=num_nodes)
+    assert tmp is not None
+    edge_weight = tmp
+    return edge_index, edge_weight
+
+
+def normalize_graph(graph):
+    graph = torch.where(graph + graph.t() > 0, 1, 0)
+    graph = graph * (1 - torch.eye(graph.size(0)))
+    row_sum = torch.sum(graph, dim=1)
+    row_sum = row_sum.masked_fill_(row_sum == 0, 1.)
+    row_sum = torch.diag(1/row_sum)
+    graph = torch.mm(row_sum, graph)
+    return graph
+
+
+def compute_LPE(data):
+    num_nodes = data.num_nodes
+    k = num_nodes - 5
+    edge_index, edge_weight = get_laplacian(
+        data.edge_index,
+        data.edge_weight,
+        normalization='sym',
+        num_nodes=num_nodes,
+    )
+
+    L = to_scipy_sparse_matrix(edge_index, edge_weight, num_nodes)
+
+    eig_vals, eig_vecs = eigsh(
+        L,
+        k=k+1,
+        which='SA',
+        return_eigenvectors=True,
+    )
+
+    eig_vecs = np.real(eig_vecs[:, eig_vals.argsort()])
+    pe = torch.from_numpy(eig_vecs[:, 1:(k+1)])
+    sign = -1 + 2 * torch.randint(0, 2, (k, ))
+    pe *= sign
+    return pe
 
 
 def get_feature_extractor_for_model(model_name: str):
